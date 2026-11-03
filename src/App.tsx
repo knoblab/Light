@@ -703,9 +703,12 @@ export function App() {
       <header className="h-11 px-3 bg-[#1E1E1E] border-b border-[#323232] flex items-center justify-between gap-4 shrink-0 z-30">
         {/* Left: Brand + Mode Switch + Import */}
         <div className="flex items-center gap-2.5 shrink-0">
-          <span className="text-xs font-semibold tracking-tight text-white whitespace-nowrap">
-            SensorClean
-          </span>
+          <div className="flex items-center gap-1.5">
+            <img src="/favicon.svg" alt="SensorClean" className="w-4 h-4 rounded-xs" />
+            <span className="text-xs font-semibold tracking-tight text-white whitespace-nowrap">
+              SensorClean
+            </span>
+          </div>
 
           <div className="flex items-center p-0.5 bg-[#141414] border border-[#323232] rounded">
             <button

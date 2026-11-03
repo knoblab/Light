@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Rounded Base Background -->
+  <rect width="64" height="64" rx="16" fill="#121316"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="15.25" stroke="#2B2E38" stroke-width="1.5"/>
+
+  <!-- Camera Body -->
+  <path d="M14 26C14 23.7909 15.7909 22 18 22H23.5L25.8 18.5C26.4 17.6 27.4 17 28.5 17H35.5C36.6 17 37.6 17.6 38.2 18.5L40.5 22H46C48.2091 22 50 23.7909 50 26V45C50 47.2091 48.2091 49 46 49H18C15.7909 49 14 47.2091 14 45V26Z" fill="#1D2028" stroke="#3E4454" stroke-width="2.5" stroke-linejoin="round"/>
+  
+  <!-- Shutter Button Accent -->
+  <rect x="20" y="19" width="4" height="2" rx="1" fill="#0A84FF"/>
+
+  <!-- Sensor / Lens Core -->
+  <circle cx="32" cy="35.5" r="9.5" fill="#0B1320" stroke="#0A84FF" stroke-width="2.5"/>
+  <rect x="27.5" y="31" width="9" height="9" rx="1.5" fill="#0A84FF" fill-opacity="0.3" stroke="#38BDF8" stroke-width="1.2"/>
+  
+  <!-- Sensor Crosshair Reflection -->
+  <line x1="27.5" y1="35.5" x2="36.5" y2="35.5" stroke="#38BDF8" stroke-width="0.8" stroke-dasharray="1.5 1"/>
+  <line x1="32" y1="31" x2="32" y2="40" stroke="#38BDF8" stroke-width="0.8" stroke-dasharray="1.5 1"/>
+
+  <!-- Primary Bright Sparkle (Upper Right) -->
+  <path d="M48 10C48 15.5 44 18 39 19C44 20 48 22.5 48 28C48 22.5 52 20 57 19C52 18 48 15.5 48 10Z" fill="#38BDF8"/>
+  <circle cx="48" cy="19" r="1.5" fill="#FFFFFF"/>
+
+  <!-- Secondary Mini Sparkle -->
+  <path d="M21 14C21 16.5 19.5 17.5 17 18C19.5 18.5 21 19.5 21 22C21 19.5 22.5 18.5 25 18C22.5 17.5 21 16.5 21 14Z" fill="#FBBF24"/>
+</svg>
