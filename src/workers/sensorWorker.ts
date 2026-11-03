@@ -1,0 +1,512 @@
+/// <reference lib="webworker" />
+
+import {
+  DetectedDustSpot,
+  DetectionParams,
+  DetectionResult,
+  InpaintResult,
+  ManualBrushStroke,
+  SessionMetadata,
+} from '../types/sensor';
+import { decodeImageFileLocal } from '../engine/tiffRawDecoder';
+import {
+  computeDetGrayFromRgb8,
+  detectSensorDustLocal,
+  inpaint16BitAndCameraRgbLocal,
+  resizeRgb8Area,
+  runMultiFrameClustering,
+} from '../engine/dustAlgorithms';
+import {
+  buildZipArchiveBlob,
+  encodeMaskU8ToBlob,
+  encodeRgb8ToBlob,
+  writeLinearDngBuffer,
+  writeTiff16Buffer,
+} from '../engine/binaryExporters';
+
+interface WorkerSessionData {
+  sessionId: string;
+  meta: SessionMetadata;
+  origRgb8: Uint8Array;
+  linear16: Uint16Array;
+  workRgb8: Uint8Array;
+  detGray: Float32Array;
+  healedRgb8?: Uint8Array;
+  healedLinear16?: Uint16Array;
+  lastDetection?: DetectionResult;
+}
+
+const sessions = new Map<string, WorkerSessionData>();
+
+async function processSingleIngestAndDetect(
+  sessionId: string,
+  fileName: string,
+  buffer: ArrayBuffer,
+  params: DetectionParams
+) {
+  const decoded = await decodeImageFileLocal(fileName, buffer);
+  const fullW = decoded.fullWidth;
+  const fullH = decoded.fullHeight;
+
+  const maxWorkDim = 2304;
+  let workScale = 1.0;
+  let workW = fullW;
+  let workH = fullH;
+  if (Math.max(fullW, fullH) > maxWorkDim) {
+    workScale = maxWorkDim / Math.max(fullW, fullH);
+    workW = Math.max(1, Math.round(fullW * workScale));
+    workH = Math.max(1, Math.round(fullH * workScale));
+  }
+
+  const workRgb8 =
+    workW === fullW && workH === fullH
+      ? new Uint8Array(decoded.origRgb8)
+      : resizeRgb8Area(decoded.origRgb8, fullW, fullH, workW, workH);
+
+  const detGray = computeDetGrayFromRgb8(workRgb8, workW, workH);
+
+  // Compute 16-bit stats
+  let minVal = 65535;
+  let maxVal = 0;
+  let sumVal = 0;
+  let cnt = 0;
+  const step = Math.max(3, Math.floor(decoded.linear16.length / 30000) * 3);
+  for (let i = 0; i < decoded.linear16.length; i += step) {
+    const v = decoded.linear16[i];
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
+    sumVal += v;
+    cnt++;
+  }
+  const meanVal = cnt > 0 ? Math.round((sumVal / cnt) * 10) / 10 : 12000;
+  const drEv =
+    maxVal > minVal
+      ? Math.round(Math.log2(Math.max(maxVal, 1) / Math.max(minVal, 1)) * 100) / 100
+      : 14.0;
+
+  const meta: SessionMetadata = {
+    originalFileName: fileName,
+    extension: decoded.extension,
+    isRaw: decoded.isRaw,
+    fullWidth: fullW,
+    fullHeight: fullH,
+    workWidth: workW,
+    workHeight: workH,
+    workScale,
+    exposureScale: decoded.exposureScale,
+    bitDepth: '16-bit Linear + 1:1 Original Camera Profile',
+    colorSpace: decoded.isRaw ? 'Original Camera Color & Tone Profile' : 'Original sRGB 1:1',
+    cameraWb: [1.0, 1.0, 1.0, 1.0],
+    colorMatrix: [],
+    blackLevel: [0, 0, 0, 0],
+    whiteLevel: 65535,
+    bayerPattern: 'RGBG',
+    stats16Bit: {
+      minCodeValue: minVal,
+      maxCodeValue: maxVal,
+      meanCodeValue: meanVal,
+      estimatedDynamicRangeEv: drEv,
+    },
+    exif: decoded.exif,
+  };
+
+  const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
+    detGray,
+    workW,
+    workH,
+    fullW,
+    fullH,
+    workW,
+    workH,
+    workScale,
+    params
+  );
+
+  sessions.set(sessionId, {
+    sessionId,
+    meta,
+    origRgb8: decoded.origRgb8,
+    linear16: decoded.linear16,
+    workRgb8,
+    detGray,
+    lastDetection: detectionResult,
+  });
+
+  const [previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
+    encodeRgb8ToBlob(workRgb8, workW, workH, 'image/jpeg', 0.96),
+    encodeRgb8ToBlob(vizBwEdgeRgb8, workW, workH, 'image/jpeg', 0.92),
+    encodeMaskU8ToBlob(maskAutoU8, workW, workH),
+  ]);
+
+  return {
+    sessionId,
+    meta,
+    detection: detectionResult,
+    blobs: {
+      previewOriginalBlob,
+      vizBwEdgeBlob,
+      maskAutoBlob,
+    },
+  };
+}
+
+async function renderExportBuffer(
+  session: WorkerSessionData,
+  format: 'dng' | 'tiff16' | 'png' | 'jpg',
+  healedRgb8: Uint8Array,
+  healedLinear16: Uint16Array
+): Promise<{ blob: Blob; ext: string; mimeType: string }> {
+  const { fullWidth: w, fullHeight: h } = session.meta;
+  const fmt = format.toLowerCase();
+
+  if (fmt === 'dng') {
+    const dngBuf = writeLinearDngBuffer(healedRgb8, healedLinear16, w, h, session.meta);
+    return {
+      blob: new Blob([dngBuf], { type: 'image/x-adobe-dng' }),
+      ext: 'dng',
+      mimeType: 'image/x-adobe-dng',
+    };
+  } else if (fmt === 'tiff16') {
+    const tiffBuf = writeTiff16Buffer(healedRgb8, healedLinear16, w, h, session.meta);
+    return {
+      blob: new Blob([tiffBuf], { type: 'image/tiff' }),
+      ext: 'tiff',
+      mimeType: 'image/tiff',
+    };
+  } else if (fmt === 'png') {
+    const pngBlob = await encodeRgb8ToBlob(healedRgb8, w, h, 'image/png');
+    return {
+      blob: pngBlob,
+      ext: 'png',
+      mimeType: 'image/png',
+    };
+  } else {
+    const jpgBlob = await encodeRgb8ToBlob(healedRgb8, w, h, 'image/jpeg', 0.98);
+    return {
+      blob: jpgBlob,
+      ext: 'jpg',
+      mimeType: 'image/jpeg',
+    };
+  }
+}
+
+self.onmessage = async (event: MessageEvent) => {
+  const { id, action, payload } = event.data || {};
+  try {
+    if (action === 'ingest_and_detect') {
+      const { sessionId, fileName, buffer, params } = payload;
+      const res = await processSingleIngestAndDetect(sessionId, fileName, buffer, params);
+      self.postMessage({ id, ok: true, data: res });
+      return;
+    }
+
+    if (action === 'detect') {
+      const { sessionId, params } = payload;
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+
+      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
+        session.detGray,
+        workWidth,
+        workHeight,
+        fullWidth,
+        fullHeight,
+        workWidth,
+        workHeight,
+        workScale,
+        params
+      );
+      session.lastDetection = detectionResult;
+
+      const [vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
+        encodeRgb8ToBlob(vizBwEdgeRgb8, workWidth, workHeight, 'image/jpeg', 0.92),
+        encodeMaskU8ToBlob(maskAutoU8, workWidth, workHeight),
+      ]);
+
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          detection: detectionResult,
+          blobs: { vizBwEdgeBlob, maskAutoBlob },
+        },
+      });
+      return;
+    }
+
+    if (action === 'inpaint') {
+      const {
+        sessionId,
+        spots,
+        manualStrokes,
+        inpaintRadius,
+        preserveGrain,
+      }: {
+        sessionId: string;
+        spots: DetectedDustSpot[];
+        manualStrokes: ManualBrushStroke[];
+        inpaintRadius: number;
+        preserveGrain: boolean;
+      } = payload;
+
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+
+      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
+        inpaint16BitAndCameraRgbLocal(
+          session.origRgb8,
+          session.linear16,
+          fullWidth,
+          fullHeight,
+          workWidth,
+          workHeight,
+          workScale,
+          spots || [],
+          manualStrokes || [],
+          inpaintRadius,
+          preserveGrain
+        );
+
+      session.healedRgb8 = healedRgb8;
+      session.healedLinear16 = healedLinear16;
+
+      const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
+        encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
+        encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
+      ]);
+
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          inpaintResult,
+          blobs: { previewInpaintedBlob, maskFinalBlob },
+        },
+      });
+      return;
+    }
+
+    if (action === 'export_single') {
+      const {
+        sessionId,
+        format,
+        spots,
+        manualStrokes,
+        inpaintRadius,
+        preserveGrain,
+      }: {
+        sessionId: string;
+        format: 'dng' | 'tiff16' | 'png' | 'jpg';
+        spots: DetectedDustSpot[];
+        manualStrokes: ManualBrushStroke[];
+        inpaintRadius: number;
+        preserveGrain: boolean;
+      } = payload;
+
+      const session = sessions.get(sessionId);
+      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+
+      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
+        inpaint16BitAndCameraRgbLocal(
+          session.origRgb8,
+          session.linear16,
+          fullWidth,
+          fullHeight,
+          workWidth,
+          workHeight,
+          workScale,
+          spots || [],
+          manualStrokes || [],
+          inpaintRadius,
+          preserveGrain
+        );
+
+      session.healedRgb8 = healedRgb8;
+      session.healedLinear16 = healedLinear16;
+
+      const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
+        renderExportBuffer(session, format, healedRgb8, healedLinear16),
+        encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
+        encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
+      ]);
+
+      const origBase = session.meta.originalFileName.replace(/\.[^/.]+$/, '');
+      const downloadName = `${origBase}_cleaned.${ext}`;
+
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          fileBlob,
+          downloadName,
+          inpaintResult,
+          blobs: { previewInpaintedBlob, maskFinalBlob },
+        },
+      });
+      return;
+    }
+
+    if (action === 'multi_upload') {
+      const {
+        files,
+        params,
+      }: {
+        files: Array<{ sessionId: string; fileName: string; buffer: ArrayBuffer }>;
+        params: DetectionParams;
+      } = payload;
+
+      const processedList = [];
+      for (const f of files) {
+        const res = await processSingleIngestAndDetect(f.sessionId, f.fileName, f.buffer, params);
+        processedList.push(res);
+      }
+
+      const multiReport = runMultiFrameClustering(
+        processedList.map((p) => ({
+          sessionId: p.sessionId,
+          originalFileName: p.meta.originalFileName,
+          workScale: p.meta.workScale,
+          spots: p.detection.spots,
+        })),
+        14.0,
+        2
+      );
+
+      for (const p of processedList) {
+        const pf = multiReport.perFrame.find((f) => f.sessionId === p.sessionId);
+        if (pf) {
+          p.detection = {
+            ...p.detection,
+            spots: pf.spots,
+            totalDetected: pf.totalDetected,
+          };
+          const sess = sessions.get(p.sessionId);
+          if (sess) sess.lastDetection = p.detection;
+        }
+      }
+
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          sessions: processedList,
+          multiReport,
+        },
+      });
+      return;
+    }
+
+    if (action === 'multi_detect') {
+      const {
+        sessionIds,
+        params,
+        tolerancePx = 14.0,
+        minFramesMatch = 2,
+      }: {
+        sessionIds: string[];
+        params: DetectionParams;
+        tolerancePx?: number;
+        minFramesMatch?: number;
+      } = payload;
+
+      const frameInputs = [];
+      for (const sid of sessionIds) {
+        const sess = sessions.get(sid);
+        if (!sess) continue;
+        const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
+        const { detectionResult } = detectSensorDustLocal(
+          sess.detGray,
+          workWidth,
+          workHeight,
+          fullWidth,
+          fullHeight,
+          workWidth,
+          workHeight,
+          workScale,
+          params
+        );
+        sess.lastDetection = detectionResult;
+        frameInputs.push({
+          sessionId: sid,
+          originalFileName: sess.meta.originalFileName,
+          workScale,
+          spots: detectionResult.spots,
+        });
+      }
+
+      const multiReport = runMultiFrameClustering(frameInputs, tolerancePx, minFramesMatch);
+      self.postMessage({
+        id,
+        ok: true,
+        data: multiReport,
+      });
+      return;
+    }
+
+    if (action === 'multi_export_zip') {
+      const {
+        items,
+        format,
+      }: {
+        items: Array<{
+          sessionId: string;
+          spots: DetectedDustSpot[];
+          manualStrokes: ManualBrushStroke[];
+          params: DetectionParams;
+        }>;
+        format: 'dng' | 'tiff16' | 'png' | 'jpg';
+      } = payload;
+
+      const zipEntries: Array<{ name: string; data: Uint8Array }> = [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i];
+        const sess = sessions.get(it.sessionId);
+        if (!sess) continue;
+        const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
+
+        const { healedRgb8, healedLinear16 } = inpaint16BitAndCameraRgbLocal(
+          sess.origRgb8,
+          sess.linear16,
+          fullWidth,
+          fullHeight,
+          workWidth,
+          workHeight,
+          workScale,
+          it.spots || [],
+          it.manualStrokes || [],
+          it.params?.inpaintRadius ?? 6,
+          it.params?.preserveGrain ?? true
+        );
+
+        const { blob, ext } = await renderExportBuffer(sess, format, healedRgb8, healedLinear16);
+        const arrBuf = await blob.arrayBuffer();
+        const origBase = sess.meta.originalFileName.replace(/\.[^/.]+$/, '');
+        const entryName = `${String(i + 1).padStart(2, '0')}_${origBase}_cleaned.${ext}`;
+        zipEntries.push({ name: entryName, data: new Uint8Array(arrBuf) });
+      }
+
+      const zipBlob = buildZipArchiveBlob(zipEntries);
+      const downloadName = `SensorClean_Batch_${format.toUpperCase()}.zip`;
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          zipBlob,
+          downloadName,
+        },
+      });
+      return;
+    }
+
+    throw new Error(`알 수 없는 Worker 작업: ${action}`);
+  } catch (err: any) {
+    self.postMessage({
+      id,
+      ok: false,
+      error: err?.message || String(err),
+    });
+  }
+};

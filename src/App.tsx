@@ -39,6 +39,7 @@ import {
   ViewComparisonMode,
 } from './types/sensor';
 import { DarkroomCanvas } from './components/DarkroomCanvas';
+import { localSensorEngine } from './services/localSensorEngine';
 
 type MobileDrawerTab = 'tools' | 'detect' | 'heal' | 'spots' | 'export' | null;
 
@@ -264,51 +265,13 @@ export function App() {
     return () => window.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const safeFetchJson = async (
-    url: string,
-    options?: RequestInit
-  ): Promise<{ ok: boolean; status: number; data: any }> => {
-    const res = await fetch(url, options);
-    const text = await res.text();
-    let data: any = null;
-    try {
-      data = text ? JSON.parse(text) : {};
-    } catch {
-      const isHtml =
-        text.trim().startsWith('<!doctype') ||
-        text.trim().startsWith('<!DOCTYPE') ||
-        text.trim().startsWith('<html');
-      throw new Error(
-        isHtml
-          ? `서버 응답 지연 또는 파일 제한 오류 (HTTP ${res.status})`
-          : `응답 파싱 오류 (HTTP ${res.status})`
-      );
-    }
-    return { ok: res.ok, status: res.status, data };
-  };
-
   const handleUploadFile = async (file: File) => {
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel(`${file.name} 현상 및 먼지 분석 중...`);
+    setProcessingLabel(`${file.name} 로컬 현상 및 먼지 분석 중...`);
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('method', params.method);
-      formData.append('sensitivity', String(params.sensitivity));
-      formData.append('cloudProtection', String(params.cloudProtection));
-      formData.append('minRadius', String(params.minRadius));
-      formData.append('maxRadius', String(params.maxRadius));
-      formData.append('minCircularity', String(params.minCircularity));
-
-      const { ok, data } = await safeFetchJson('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      if (!ok) {
-        throw new Error(data?.error || '파일 처리 실패');
-      }
+      const data = await localSensorEngine.uploadAndDetect(file, params);
 
       setSessionId(data.sessionId);
       setMeta(data.meta);
@@ -323,7 +286,7 @@ export function App() {
       setComparisonMode('working');
       setStudioMode('single');
     } catch (err: any) {
-      setErrorMessage(err.message || '업로드 중 오류가 발생했습니다.');
+      setErrorMessage(err.message || '파일 처리 중 오류가 발생했습니다.');
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
@@ -341,17 +304,12 @@ export function App() {
 
     try {
       if (studioMode === 'sequence' && sequenceItems.length > 0) {
-        const { ok, data } = await safeFetchJson('/api/multi-detect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionIds: sequenceItems.map((item) => item.sessionId),
-            params: nextParams,
-            tolerancePx: 14.0,
-            minFramesMatch: 2,
-          }),
-        });
-        if (!ok) throw new Error(data?.error || '연속 재탐지 실패');
+        const data = await localSensorEngine.multiDetect(
+          sequenceItems.map((item) => item.sessionId),
+          nextParams,
+          14.0,
+          2
+        );
 
         const updatedItems = sequenceItems.map((item) => {
           const pf = data.perFrame?.find((f: any) => f.sessionId === item.sessionId);
@@ -363,9 +321,6 @@ export function App() {
                 ...item.detection,
                 spots: pf.spots,
                 totalDetected: pf.totalDetected,
-                multiConfirmedCount: pf.multiConfirmedCount,
-                singleFrameCount: pf.singleFrameCount,
-                projectedCount: pf.projectedCount,
               },
             };
           }
@@ -381,15 +336,7 @@ export function App() {
         const curItem = updatedItems[activeSequenceIndex];
         if (curItem) setSpots(curItem.spots);
       } else {
-        const { ok, data } = await safeFetchJson('/api/detect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId,
-            params: nextParams,
-          }),
-        });
-        if (!ok) throw new Error(data?.error || '재탐지 실패');
+        const data = await localSensorEngine.detect(sessionId, nextParams);
 
         setSpots(data.detection.spots || []);
         setUrls((prev) =>
@@ -439,22 +386,10 @@ export function App() {
     if (files.length === 0) return;
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel(`연속 사진 ${files.length}장 분석 중...`);
+    setProcessingLabel(`연속 사진 ${files.length}장 로컬 분석 중...`);
 
     try {
-      const formData = new FormData();
-      for (const f of files) {
-        formData.append('files', f);
-      }
-
-      const { ok, data } = await safeFetchJson('/api/multi-upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!ok) {
-        throw new Error(data?.error || '연속 사진 업로드 실패');
-      }
+      const data = await localSensorEngine.multiUpload(files, params);
 
       const items: MultiFrameItem[] = (data.sessions || []).map((s: any) => ({
         sessionId: s.sessionId,
@@ -533,28 +468,22 @@ export function App() {
       const updatedItems = [...currentItems];
       for (let i = 0; i < updatedItems.length; i++) {
         const it = updatedItems[i];
-        const { ok, data } = await safeFetchJson('/api/inpaint', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            sessionId: it.sessionId,
-            spots: it.spots,
-            manualStrokes: it.manualStrokes,
-            inpaintRadius: params.inpaintRadius,
-            preserveGrain: params.preserveGrain,
-          }),
-        });
-        if (ok && data) {
-          updatedItems[i] = {
-            ...it,
-            inpaintResult: data.inpaintResult,
-            urls: {
-              ...it.urls,
-              previewInpainted: data.urls.previewInpainted,
-              maskFinal: data.urls.maskFinal,
-            },
-          };
-        }
+        const data = await localSensorEngine.inpaint(
+          it.sessionId,
+          it.spots,
+          it.manualStrokes,
+          params.inpaintRadius,
+          params.preserveGrain
+        );
+        updatedItems[i] = {
+          ...it,
+          inpaintResult: data.inpaintResult,
+          urls: {
+            ...it.urls,
+            previewInpainted: data.urls.previewInpainted,
+            maskFinal: data.urls.maskFinal,
+          },
+        };
       }
 
       setSequenceItems(updatedItems);
@@ -571,93 +500,6 @@ export function App() {
       setIsProcessing(false);
       setProcessingLabel('');
     }
-  };
-
-  const downloadPreparedFileInChunks = async (
-    exportMeta: {
-      sessionId: string;
-      fileName: string;
-      downloadName?: string;
-      mimeType: string;
-      fileSizeBytes: number;
-      chunkSize: number;
-      totalChunks: number;
-    },
-    labelPrefix: string
-  ) => {
-    const {
-      sessionId: targetSession,
-      fileName,
-      downloadName,
-      mimeType,
-      fileSizeBytes,
-      chunkSize,
-      totalChunks,
-    } = exportMeta;
-
-    const totalMb = (fileSizeBytes / (1024 * 1024)).toFixed(1);
-    const orderedChunks: BlobPart[] = new Array(totalChunks);
-    let completedChunks = 0;
-    const CONCURRENCY = 3;
-
-    for (let batchStart = 0; batchStart < totalChunks; batchStart += CONCURRENCY) {
-      const batchIndices: number[] = [];
-      for (
-        let idx = batchStart;
-        idx < Math.min(totalChunks, batchStart + CONCURRENCY);
-        idx++
-      ) {
-        batchIndices.push(idx);
-      }
-
-      await Promise.all(
-        batchIndices.map(async (chunkIdx) => {
-          const offset = chunkIdx * chunkSize;
-          const length = Math.min(chunkSize, fileSizeBytes - offset);
-          const chunkUrl = `/api/export-chunk/${encodeURIComponent(
-            targetSession
-          )}/${encodeURIComponent(fileName)}?offset=${offset}&length=${length}`;
-
-          const chunkRes = await fetch(chunkUrl, {
-            method: 'GET',
-            credentials: 'same-origin',
-            cache: 'no-store',
-          });
-
-          if (!chunkRes.ok) {
-            throw new Error(`청크 다운로드 실패 (HTTP ${chunkRes.status})`);
-          }
-
-          const ct = chunkRes.headers.get('content-type') || '';
-          if (ct.includes('text/html')) {
-            throw new Error('세션 인증 오류');
-          }
-
-          const arrayBuf = await chunkRes.arrayBuffer();
-          orderedChunks[chunkIdx] = arrayBuf;
-          completedChunks += 1;
-
-          const pct = Math.min(100, Math.round((completedChunks / totalChunks) * 100));
-          const loadedMb = Math.min(
-            Number(totalMb),
-            Number(((completedChunks * chunkSize) / (1024 * 1024)).toFixed(1))
-          );
-          setProcessingLabel(`${labelPrefix} 다운로드 ${pct}% (${loadedMb}/${totalMb}MB)`);
-        })
-      );
-    }
-
-    const blob = new Blob(orderedChunks, {
-      type: mimeType || 'application/octet-stream',
-    });
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = downloadName || fileName;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
   };
 
   const handleBatchExportZip = async (format: 'dng' | 'tiff16' | 'png' | 'jpg') => {
@@ -677,17 +519,11 @@ export function App() {
         params,
       }));
 
-      const { ok, data } = await safeFetchJson('/api/multi-export-zip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: exportItems, format, prepareOnly: true }),
-      });
-
-      if (!ok || !data?.exportMeta) {
-        throw new Error(data?.error || 'ZIP 생성 실패');
-      }
-
-      await downloadPreparedFileInChunks(data.exportMeta, `ZIP (${format.toUpperCase()})`);
+      const { zipBlob, downloadName } = await localSensorEngine.multiExportZip(
+        exportItems,
+        format
+      );
+      localSensorEngine.triggerBrowserDownload(zipBlob, downloadName);
     } catch (err: any) {
       setErrorMessage(err.message || 'ZIP 내보내기 실패');
     } finally {
@@ -743,20 +579,13 @@ export function App() {
     setProcessingLabel('먼지 복원 적용 중...');
 
     try {
-      const { ok, data } = await safeFetchJson('/api/inpaint', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          spots,
-          manualStrokes,
-          inpaintRadius: params.inpaintRadius,
-          preserveGrain: params.preserveGrain,
-        }),
-      });
-      if (!ok) {
-        throw new Error(data?.error || '복원 실패');
-      }
+      const data = await localSensorEngine.inpaint(
+        sessionId,
+        spots,
+        manualStrokes,
+        params.inpaintRadius,
+        params.preserveGrain
+      );
 
       setInpaintResult(data.inpaintResult);
       setUrls((prev) =>
@@ -796,33 +625,25 @@ export function App() {
 
     try {
       setProcessingLabel(`${labelPrefix} 렌더링 중...`);
-      const prepRes = await safeFetchJson('/api/export-prepare', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          format,
-          spots,
-          manualStrokes,
-          inpaintRadius: params.inpaintRadius,
-          preserveGrain: params.preserveGrain,
-        }),
-      });
+      const res = await localSensorEngine.exportSingle(
+        sessionId,
+        format,
+        spots,
+        manualStrokes,
+        params.inpaintRadius,
+        params.preserveGrain
+      );
 
-      if (!prepRes.ok || !prepRes.data?.exportMeta) {
-        throw new Error(prepRes.data?.error || '내보내기 실패');
+      if (res.inpaintResult) {
+        setInpaintResult(res.inpaintResult);
       }
-
-      if (prepRes.data.inpaintResult) {
-        setInpaintResult(prepRes.data.inpaintResult);
-      }
-      if (prepRes.data.urls?.previewInpainted) {
+      if (res.urls?.previewInpainted) {
         setUrls((prev) =>
           prev
             ? {
                 ...prev,
-                previewInpainted: prepRes.data.urls.previewInpainted,
-                maskFinal: prepRes.data.urls.maskFinal,
+                previewInpainted: res.urls.previewInpainted,
+                maskFinal: res.urls.maskFinal,
               }
             : null
         );
@@ -830,7 +651,7 @@ export function App() {
       setShowDustOverlay(false);
       setComparisonMode('healed-only');
 
-      await downloadPreparedFileInChunks(prepRes.data.exportMeta, labelPrefix);
+      localSensorEngine.triggerBrowserDownload(res.fileBlob, res.downloadName);
     } catch (err: any) {
       setErrorMessage(err.message || '내보내기 실패');
     } finally {
