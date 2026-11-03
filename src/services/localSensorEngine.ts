@@ -14,6 +14,7 @@ import SensorWorker from '../workers/sensorWorker?worker';
 interface PendingRequest {
   resolve: (data: any) => void;
   reject: (err: Error) => void;
+  onProgress?: (percent: number, label?: string) => void;
 }
 
 class LocalSensorEngineClient {
@@ -25,9 +26,15 @@ class LocalSensorEngineClient {
     if (!this.worker) {
       this.worker = new SensorWorker();
       this.worker.onmessage = (e: MessageEvent) => {
-        const { id, ok, data, error } = e.data || {};
+        const { id, type, percent, label, ok, data, error } = e.data || {};
         const entry = this.pending.get(id);
         if (!entry) return;
+
+        if (type === 'progress') {
+          entry.onProgress?.(percent, label);
+          return;
+        }
+
         this.pending.delete(id);
         if (ok) {
           entry.resolve(data);
@@ -48,19 +55,21 @@ class LocalSensorEngineClient {
   private callWorker<T = any>(
     action: string,
     payload: any,
-    transfer: Transferable[] = []
+    transfer: Transferable[] = [],
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<T> {
     const worker = this.getWorker();
     const id = ++this.reqCounter;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { resolve, reject, onProgress });
       worker.postMessage({ id, action, payload }, transfer);
     });
   }
 
   async uploadAndDetect(
     file: File,
-    params: DetectionParams
+    params: DetectionParams,
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{
     sessionId: string;
     meta: SessionMetadata;
@@ -77,7 +86,8 @@ class LocalSensorEngineClient {
         buffer,
         params,
       },
-      [buffer]
+      [buffer],
+      onProgress
     );
 
     const urls: SessionUrls = {
@@ -96,12 +106,13 @@ class LocalSensorEngineClient {
 
   async detect(
     sessionId: string,
-    params: DetectionParams
+    params: DetectionParams,
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{
     detection: DetectionResult;
     urls: { vizBwEdge: string; maskAuto: string };
   }> {
-    const res = await this.callWorker('detect', { sessionId, params });
+    const res = await this.callWorker('detect', { sessionId, params }, [], onProgress);
     return {
       detection: res.detection,
       urls: {
@@ -116,18 +127,24 @@ class LocalSensorEngineClient {
     spots: DetectedDustSpot[],
     manualStrokes: ManualBrushStroke[],
     inpaintRadius: number,
-    preserveGrain: boolean
+    preserveGrain: boolean,
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{
     inpaintResult: InpaintResult;
     urls: { previewInpainted: string; maskFinal: string };
   }> {
-    const res = await this.callWorker('inpaint', {
-      sessionId,
-      spots,
-      manualStrokes,
-      inpaintRadius,
-      preserveGrain,
-    });
+    const res = await this.callWorker(
+      'inpaint',
+      {
+        sessionId,
+        spots,
+        manualStrokes,
+        inpaintRadius,
+        preserveGrain,
+      },
+      [],
+      onProgress
+    );
 
     return {
       inpaintResult: res.inpaintResult,
@@ -145,22 +162,28 @@ class LocalSensorEngineClient {
     manualStrokes: ManualBrushStroke[],
     inpaintRadius: number,
     preserveGrain: boolean,
-    colorSpace: ColorSpaceId = 'auto'
+    colorSpace: ColorSpaceId = 'auto',
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{
     fileBlob: Blob;
     downloadName: string;
     inpaintResult: InpaintResult;
     urls: { previewInpainted: string; maskFinal: string };
   }> {
-    const res = await this.callWorker('export_single', {
-      sessionId,
-      format,
-      spots,
-      manualStrokes,
-      inpaintRadius,
-      preserveGrain,
-      colorSpace,
-    });
+    const res = await this.callWorker(
+      'export_single',
+      {
+        sessionId,
+        format,
+        spots,
+        manualStrokes,
+        inpaintRadius,
+        preserveGrain,
+        colorSpace,
+      },
+      [],
+      onProgress
+    );
 
     return {
       fileBlob: res.fileBlob,

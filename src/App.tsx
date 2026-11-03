@@ -147,8 +147,14 @@ export function App() {
   // Processing state
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [processingLabel, setProcessingLabel] = useState<string>('');
+  const [progressPercent, setProgressPercent] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
+
+  const handleProgress = (percent: number, label?: string) => {
+    setProgressPercent(percent);
+    if (label) setProcessingLabel(label);
+  };
 
   const topFileInputRef = useRef<HTMLInputElement>(null);
   const multiFileInputRef = useRef<HTMLInputElement>(null);
@@ -276,10 +282,11 @@ export function App() {
   const handleUploadFile = async (file: File) => {
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(5);
     setProcessingLabel(`${file.name} 불러오는 중...`);
 
     try {
-      const data = await localSensorEngine.uploadAndDetect(file, params);
+      const data = await localSensorEngine.uploadAndDetect(file, params, handleProgress);
 
       setSessionId(data.sessionId);
       setMeta(data.meta);
@@ -299,6 +306,7 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
     }
   };
 
@@ -310,6 +318,7 @@ export function App() {
     setParams(nextParams);
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(5);
     setProcessingLabel('먼지 분석 중...');
 
     try {
@@ -346,7 +355,7 @@ export function App() {
         const curItem = updatedItems[activeSequenceIndex];
         if (curItem) setSpots(curItem.spots);
       } else {
-        const data = await localSensorEngine.detect(sessionId, nextParams);
+        const data = await localSensorEngine.detect(sessionId, nextParams, handleProgress);
 
         setSpots(data.detection.spots || []);
         setUrls((prev) =>
@@ -366,6 +375,7 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
     }
   };
 
@@ -588,6 +598,7 @@ export function App() {
     pushHistorySnapshot();
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(5);
     setProcessingLabel('스팟 제거 적용 중...');
 
     try {
@@ -596,7 +607,8 @@ export function App() {
         spots,
         manualStrokes,
         params.inpaintRadius,
-        params.preserveGrain
+        params.preserveGrain,
+        handleProgress
       );
 
       setInpaintResult(data.inpaintResult);
@@ -616,6 +628,7 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
     }
   };
 
@@ -627,6 +640,7 @@ export function App() {
     setMobileTab(null);
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(5);
 
     const formatNames: Record<string, string> = {
       dng: 'DNG (16-bit)',
@@ -645,7 +659,8 @@ export function App() {
         manualStrokes,
         params.inpaintRadius,
         params.preserveGrain,
-        selectedColorSpace
+        selectedColorSpace,
+        handleProgress
       );
 
       if (res.inpaintResult) {
@@ -668,6 +683,7 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
       setTimeout(() => setExportingFormat(null), 400);
     }
   };
@@ -767,7 +783,7 @@ export function App() {
               type="button"
               onClick={() => handleRedetect()}
               disabled={isProcessing}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap"
+              className="hidden md:flex items-center gap-1 px-2.5 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
               title="먼지 분석 실행"
             >
               <Search className="w-3 h-3" />
@@ -776,7 +792,7 @@ export function App() {
           )}
 
           {sessionId && (
-            <div className="flex items-center gap-0.5 ml-0.5">
+            <div className="flex items-center gap-0.5 ml-0.5 shrink-0">
               <button
                 type="button"
                 onClick={handleUndo}
@@ -867,9 +883,9 @@ export function App() {
           </div>
         )}
 
-        {/* Mobile Center Filename */}
+        {/* Mobile Center Filename (Visible only from sm breakpoint) */}
         {meta && (
-          <div className="flex lg:hidden items-center gap-1.5 text-[11px] text-[#C2C1BB] truncate">
+          <div className="hidden sm:flex lg:hidden items-center gap-1.5 text-[11px] text-[#C2C1BB] truncate">
             <span className="truncate max-w-[100px] text-[#E7E6E1]">
               {meta.originalFileName}
             </span>
@@ -1069,6 +1085,7 @@ export function App() {
             hasInpaintedResult={Boolean(inpaintResult && urls?.previewInpainted)}
             isProcessing={isProcessing}
             processingLabel={processingLabel}
+            progressPercent={progressPercent}
             onUploadFile={handleUploadFile}
             onBeginHistoryBatch={pushHistorySnapshot}
             onBatchDeselectSpots={handleBatchDeselectSpots}
@@ -1803,39 +1820,38 @@ export function App() {
 
           {/* Mobile Tab 2: Detect */}
           {mobileTab === 'detect' && (
-            <div className="space-y-2 max-h-[210px] overflow-y-auto pr-1">
-              <div className="flex items-center gap-1.5">
-                <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#2B2B2E] border border-[#535356] rounded flex-1">
-                  {(
-                    [
-                      { id: 'dual', label: '듀얼' },
-                      { id: 'sharp', label: '미세' },
-                      { id: 'bokeh', label: '보케' },
-                    ] as { id: DetectionMethod; label: string }[]
-                  ).map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => handleRedetect({ method: m.id })}
-                      className={`py-1 rounded-xs text-[11px] font-medium cursor-pointer ${
-                        params.method === m.id
-                          ? 'bg-[#556042] text-white'
-                          : 'text-[#888783]'
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleRedetect()}
-                  disabled={!sessionId || isProcessing}
-                  className="px-3 py-1.5 rounded bg-[#556042] text-white text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>먼지 분석</span>
-                </button>
+            <div className="space-y-2.5 max-h-[240px] overflow-y-auto pr-1">
+              <button
+                type="button"
+                onClick={() => handleRedetect()}
+                disabled={!sessionId || isProcessing}
+                className="w-full py-2 rounded-lg bg-[#556042] hover:bg-[#687652] text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0 cursor-pointer shadow-md disabled:opacity-40"
+              >
+                <Search className="w-4 h-4" />
+                <span>2. 먼지 분석 실행</span>
+              </button>
+
+              <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#2B2B2E] border border-[#535356] rounded">
+                {(
+                  [
+                    { id: 'dual', label: '듀얼' },
+                    { id: 'sharp', label: '미세' },
+                    { id: 'bokeh', label: '보케' },
+                  ] as { id: DetectionMethod; label: string }[]
+                ).map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => handleRedetect({ method: m.id })}
+                    className={`py-1.5 rounded-xs text-[11px] font-medium cursor-pointer ${
+                      params.method === m.id
+                        ? 'bg-[#556042] text-white'
+                        : 'text-[#888783]'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
               </div>
 
               <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">

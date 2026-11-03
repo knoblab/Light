@@ -48,13 +48,25 @@ interface WorkerSessionData {
 
 const sessions = new Map<string, WorkerSessionData>();
 
+function sendProgress(reqId: number, percent: number, label?: string) {
+  self.postMessage({
+    id: reqId,
+    type: 'progress',
+    percent: Math.min(100, Math.max(0, percent)),
+    label,
+  });
+}
+
 async function processSingleIngestAndDetect(
+  reqId: number,
   sessionId: string,
   fileName: string,
   buffer: ArrayBuffer,
   params: DetectionParams
 ) {
+  sendProgress(reqId, 15, '파일 로딩 및 바이너리 읽는 중...');
   const decoded = await decodeImageFileLocal(fileName, buffer);
+  sendProgress(reqId, 45, '해상도 및 16-bit 메타데이터 파싱 중...');
   const fullW = decoded.fullWidth;
   const fullH = decoded.fullHeight;
 
@@ -152,11 +164,15 @@ async function processSingleIngestAndDetect(
     lastDetection: detectionResult,
   });
 
+  sendProgress(reqId, 75, '미리보기 캔버스 생성 중...');
+
   const [previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
     encodeRgb8ToBlob(workRgb8, workW, workH, 'image/jpeg', 0.96),
     encodeRgb8ToBlob(vizBwEdgeRgb8, workW, workH, 'image/jpeg', 0.92),
     encodeMaskU8ToBlob(maskAutoU8, workW, workH),
   ]);
+
+  sendProgress(reqId, 100, '로딩 완료');
 
   return {
     sessionId,
@@ -258,17 +274,19 @@ self.onmessage = async (event: MessageEvent) => {
   try {
     if (action === 'ingest_and_detect') {
       const { sessionId, fileName, buffer, params } = payload;
-      const res = await processSingleIngestAndDetect(sessionId, fileName, buffer, params);
+      const res = await processSingleIngestAndDetect(id, sessionId, fileName, buffer, params);
       self.postMessage({ id, ok: true, data: res });
       return;
     }
 
     if (action === 'detect') {
       const { sessionId, params } = payload;
+      sendProgress(id, 20, '그레이스케일 변환 및 오버레이 분석 준비 중...');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      sendProgress(id, 50, '센서 먼지 엣지 필터링 중...');
       const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
         session.detGray,
         workWidth,
@@ -282,11 +300,13 @@ self.onmessage = async (event: MessageEvent) => {
       );
       session.lastDetection = detectionResult;
 
+      sendProgress(id, 85, '스팟 클러스터링 계산 및 미리보기 생성 중...');
       const [vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
         encodeRgb8ToBlob(vizBwEdgeRgb8, workWidth, workHeight, 'image/jpeg', 0.92),
         encodeMaskU8ToBlob(maskAutoU8, workWidth, workHeight),
       ]);
 
+      sendProgress(id, 100, '분석 완료');
       self.postMessage({
         id,
         ok: true,
@@ -313,10 +333,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
+      sendProgress(id, 20, '마스크 렌더링 및 알고리즘 준비 중...');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      sendProgress(id, 50, '패치 매칭 및 스팟 제거 인페인팅 적용 중...');
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -335,11 +357,13 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
+      sendProgress(id, 85, '센서 그레인 복원 및 미리보기 렌더링 중...');
       const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
         encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
       ]);
 
+      sendProgress(id, 100, '적용 완료');
       self.postMessage({
         id,
         ok: true,
@@ -370,10 +394,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
+      sendProgress(id, 20, '1:1 원본 해상도 렌더링 준비 중...');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
+      sendProgress(id, 45, '1:1 버퍼 생성 및 먼지 제거 적용 중...');
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -392,6 +418,7 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
+      sendProgress(id, 75, '색공간 변환 및 메타데이터 주입 중...');
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
@@ -400,6 +427,8 @@ self.onmessage = async (event: MessageEvent) => {
 
       const origBase = session.meta.originalFileName.replace(/\.[^/.]+$/, '');
       const downloadName = `${origBase}_cleaned.${ext}`;
+
+      sendProgress(id, 100, '내보내기 완료');
 
       self.postMessage({
         id,
@@ -424,8 +453,10 @@ self.onmessage = async (event: MessageEvent) => {
       } = payload;
 
       const processedList = [];
-      for (const f of files) {
-        const res = await processSingleIngestAndDetect(f.sessionId, f.fileName, f.buffer, params);
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        sendProgress(id, Math.round(((i + 1) / files.length) * 100), `연속 사진 ${i + 1}/${files.length} 로딩 중...`);
+        const res = await processSingleIngestAndDetect(id, f.sessionId, f.fileName, f.buffer, params);
         processedList.push(res);
       }
 

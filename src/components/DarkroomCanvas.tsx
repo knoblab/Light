@@ -40,6 +40,7 @@ interface DarkroomCanvasProps {
   hasInpaintedResult: boolean;
   isProcessing: boolean;
   processingLabel: string;
+  progressPercent?: number;
   onUploadFile: (file: File) => void;
   onBatchDeselectSpots?: (ids: string[]) => void;
   onBeginHistoryBatch?: () => void;
@@ -72,6 +73,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   hasInpaintedResult,
   isProcessing,
   processingLabel,
+  progressPercent = 0,
   onUploadFile,
   onBatchDeselectSpots,
   onBeginHistoryBatch,
@@ -757,14 +759,29 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         </>
       )}
 
-      {/* Minimal Lightroom Processing Modal */}
+      {/* Processing Modal Card with Progress Bar and Percentage */}
       {isProcessing && (
         <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center z-40 px-4">
-          <div className="px-5 py-3.5 rounded-lg bg-[#3A3A3D] border border-[#535356] flex items-center gap-3 shadow-2xl max-w-md">
-            <div className="w-4 h-4 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
-            <span className="text-xs font-medium text-[#E7E6E1] leading-snug">
-              {processingLabel || '처리 중...'}
-            </span>
+          <div className="px-6 py-4.5 rounded-xl bg-[#3A3A3D] border border-[#535356] flex flex-col gap-3 shadow-2xl w-full max-w-sm">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5 truncate">
+                <div className="w-4 h-4 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
+                <span className="text-xs font-semibold text-[#E7E6E1] leading-snug truncate">
+                  {processingLabel || '처리 중...'}
+                </span>
+              </div>
+              <span className="text-xs font-bold text-[#E7E6E1] shrink-0 tabular-nums">
+                {Math.min(100, Math.max(0, Math.round(progressPercent)))}%
+              </span>
+            </div>
+
+            {/* Progress Bar Track */}
+            <div className="w-full bg-[#2B2B2E] h-2 rounded-full overflow-hidden border border-[#535356] p-0.5">
+              <div
+                style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
+                className="bg-[#556042] h-full rounded-full transition-all duration-200 ease-out"
+              />
+            </div>
           </div>
         </div>
       )}
