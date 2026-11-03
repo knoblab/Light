@@ -72,6 +72,20 @@ export interface ExifMetadata {
   focalLength: string | null;
   dateTime: string | null;
   software: string;
+  lensModel?: string | null;
+  lensMake?: string | null;
+  artist?: string | null;
+  copyright?: string | null;
+  shutterSpeedValue?: number | null;
+  apertureValue?: number | null;
+  exposureBiasValue?: number | null;
+  meteringMode?: number | null;
+  flash?: number | null;
+  whiteBalanceMode?: number | null;
+  focalLengthIn35mm?: number | null;
+  rawApp1ExifBytes?: Uint8Array;
+  rawXmpBytes?: Uint8Array;
+  rawGpsBytes?: Uint8Array;
 }
 
 export interface SessionMetadata {

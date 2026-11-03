@@ -1,46 +1,114 @@
-# 광색역 색공간 지원 (Adobe RGB · DCI-P3 · BT.2020 · ProPhoto RGB) 구현 계획
+# DNG·TIFF·JPG·PNG 전 포맷 카메라 및 EXIF/XMP 메타데이터 완전 보존 엔진
 
-## 1. 목표 및 핵심 해결 과제
-기존 `sRGB` 단일 색공간은 카메라 센서(RAW)나 광색역 촬영본(`Adobe RGB`, `DCI-P3`, `BT.2020`)의 깊은 에메랄드, 시안, 채도 높은 단풍/하늘 영역을 잘라내어(Gamut Clipping) 색감이 좁고 답답해지는 한계가 있습니다. 이를 해결하기 위해 **원본 색공간 자동 감지 + 수동 광색역 선택 + 전 포맷(DNG, 16-bit TIFF, PNG, JPG) 표준 ICC 프로파일 및 광색역 행렬 내장** 파이프라인을 구축합니다.
+카메라 원본 파일(RAW, RW2, DNG, TIFF, JPEG)에서 카메라 제조사(Make), 모델(Model), 렌즈 정보(LensModel), 촬영 파라미터(셔터스피드, 조리개, ISO, 초점거리, 화이트밸런스 등) 및 EXIF/XMP 바이너리 블록을 완전히 파싱하여 보존하고, DNG·16비트 TIFF·JPG·PNG로 내보낼 때 100% 무손실로 주입하는 시스템을 구현합니다.
+
+## User Review & Critical Decisions
+
+> [!IMPORTANT]
+> 사용자가 Phase 1 질문을 통해 확정한 요구사항을 반영하였습니다:
+> - **보존 범위**: 카메라 제조사, 모델, 렌즈 및 모든 EXIF 태그(EXIF IFD, GPS, 촬영 설정) 완전 보존.
+> - **주입 방식**: EXIF 및 XMP 바이너리 블록을 원본 규격에 맞추어 무손실 직접 주입 (DNG/TIFF IFD 링크, JPEG APP1 마커 세그먼트, PNG eXIf/iTXt 청크).
+
+- **확정된 결정 1**: 모든 내보내기 포맷(DNG, TIFF, JPG, PNG)에서 카메라 모델명 및 렌즈 정보가 윈도우 탐색기, 맥 Finder, 라이트룸, 스마트폰 갤러리 상세정보에서 그대로 유지되도록 합니다.
+- **확정된 결정 2**: 먼지가 제거된 픽셀 데이터만 정밀 복원되고, 카메라 메타데이터 및 ICC 광색역 프로파일은 원본과 동일하게 1:1 패키징됩니다.
 
 ---
 
-## 2. 세부 아키텍처 및 구현 항목
+## 1. Overview & Core Concept
 
-### A. 원본 색공간 및 내장 ICC 프로파일 자동 감지 (`/src/engine/colorSpaces.ts`, `/src/engine/tiffRawDecoder.ts`)
-1. **메타데이터 및 바이너리 프로파일 추출**:
-   - **TIFF / DNG / RAW (`Tag 34675 ICCProfile`)**, **JPEG (`APP2 ICC_PROFILE` 세그먼트)**, **PNG (`iCCP` / `cHRM` 청크)**에서 원본에 내장된 바이너리 ICC 프로파일(`Uint8Array`)과 프로파일 설명(`desc`)을 직접 추출합니다.
-   - **EXIF 색공간 태그 감지**: `ColorSpace` (`Tag 40961 = 2` 또는 `65535 Uncalibrated`), `InteroperabilityIndex` (`"R03"` = Adobe RGB), 파나소닉 `.RW2` 내장 JPEG의 Adobe RGB 마커를 분석해 촬영 시 설정된 색공간(`Adobe RGB (1998)`, `Display P3`, `BT.2020`, `sRGB`)을 자동으로 판별합니다.
-2. **Display P3 광색역 캔버스 디코딩 및 렌더링**:
-   - 브라우저의 `OffscreenCanvas` 및 미리보기 캔버스에서 `colorSpace: 'display-p3'`(지원 기기) 및 `colorSpaceConversion: 'none'`을 활용하여 광색역 픽셀이 디코딩 과정에서 `sRGB`로 강제 클리핑되지 않도록 보존합니다.
+- **목적**: 사용자가 센서 먼지를 제거한 후 사진을 내보냈을 때 카메라 모델명(`Lumix DC-G9`, `Sony ILCE-7M4`, `Canon EOS R5` 등), 렌즈 정보, 촬영 일시, ISO, 셔터스피드, 조리개, 색온도, GPS 정보 등이 삭제되거나 "Unknown"으로 유실되는 문제를 방지합니다.
+- **지원 대상**:
+  - **입력**: RAW(.rw2, .cr2, .cr3, .nef, .arw, .orf, .raf), .dng, .tif/.tiff, .jpg/.jpeg, .png
+  - **출력**:
+    - **DNG (16-bit)**: IFD0 (카메라 제조사/모델, 소프트웨어, 일시) + ExifIFD (태그 34665: 노출값, 렌즈, ISO 등) + XMP (태그 700) + ICC (태그 34675)
+    - **TIFF (16-bit)**: 표준 ExifIFD 서브 디렉터리 및 원본 메타데이터 완벽 복제
+    - **JPG (98%)**: `APP1` (`\xFF\xE1`) Exif 블록 + `APP1` XMP 블록 + `APP2` ICC 프로파일 직접 주입
+    - **PNG (무손실)**: 표준 `eXIf` 청크 및 `iTXt` (XMP) 청크 주입
 
-### B. 6종 색공간 엔진 및 16-bit CIE XYZ(D50) 색역 변환 (`/src/engine/colorSpaces.ts`)
-우측 패널 및 모바일 패널에서 즉시 확인·전환할 수 있는 색공간 옵션을 제공합니다:
-1. **`auto` (원본 색공간 유지 - 기본값)**: 원본 파일에서 감지된 색공간과 내장 ICC 프로파일을 클리핑 없이 1:1 그대로 유지합니다.
-2. **`adobe-rgb` (Adobe RGB 1998)**:
-   - Primaries: `R(0.64, 0.33)`, `G(0.21, 0.71)`, `B(0.15, 0.06)`, White Point `D65`, Gamma `2.19921875 (563/256)`.
-3. **`display-p3` (DCI-P3 / Display P3)**:
-   - Primaries: `R(0.680, 0.320)`, `G(0.265, 0.690)`, `B(0.150, 0.060)`, White Point `D65`, sRGB/Display P3 전달 함수.
-4. **`bt2020` (ITU-R BT.2020 / Rec.2020)**:
-   - Primaries: `R(0.708, 0.292)`, `G(0.170, 0.797)`, `B(0.131, 0.046)`, White Point `D65`, BT.2020 12-bit TRC (`α=1.0993, β=0.0181`).
-5. **`prophoto-rgb` (ProPhoto RGB / ROMM RGB)**:
-   - Primaries: `R(0.7347, 0.2653)`, `G(0.1596, 0.8404)`, `B(0.0366, 0.0001)`, White Point `D50`, Gamma `1.8`.
-6. **`srgb` (sRGB IEC61966-2.1)**: 웹 표준 호환용 색공간.
+---
 
-- **16-bit 정밀 색공간 변환**:
-  - 원본 색공간과 다른 출력 색공간을 수동 선택한 경우, 65,536단계 선형화 LUT → Bradford 색순응(Chromatic Adaptation)이 적용된 `3×3` `RGB_lin → CIE XYZ (D50) → Target_RGB_lin` 행렬 연산 → 타깃 색공간 65,536단계 감마 LUT를 거쳐 계조 손실 없이 변환합니다.
-  - 먼지 영역 외 무손실 보존(`Zero-Touch Outside Mask`) 원칙은 동일하게 유지되어, `원본 유지(auto)` 시 먼지 바깥 픽셀은 단 1비트도 변하지 않습니다.
+## 2. Technical Architecture & Component Flow
 
-### C. 표준 ICC v2.4 바이너리 프로파일 생성 및 포맷별 내장 (`/src/engine/binaryExporters.ts`)
-내보낸 사진을 갤러리 앱, 포토샵, 라이트룸, 운영체제 뷰어에서 열었을 때 광색역 색상이 정확히 표시되도록 모든 내보내기 포맷에 **실제 표준 ICC 프로파일 바이너리**를 심습니다:
-1. **표준 ICC v2.4 프로파일 빌더 (`buildIccProfileBytes`)**:
-   - 선택한 색공간(`Adobe RGB (1998)`, `Display P3`, `Rec.2020`, `ProPhoto RGB`, `sRGB`)의 D50 적응 원색 행렬(`rXYZ`, `gXYZ`, `bXYZ`), 백색점(`wtpt`), 감마 곡선(`rTRC`, `gTRC`, `bTRC`), 설명(`desc`) 태그를 포함한 국제 표준 ICC v2.4 바이너리를 생성합니다 (원본에 자체 ICC 프로파일이 있고 `auto` 모드인 경우 원본 ICC 바이너리를 그대로 보존).
-2. **포맷별 프로파일 삽입**:
-   - **DNG (16-bit)**: `IFD0`에 `ICCProfile (Tag 34675)` / `AsShotICCProfile (Tag 50831)` 및 선택된 광색역에 맞춘 `ColorMatrix1 (Tag 50721)`·`ProfileName (Tag 50936)`·`ProfileToneCurve (Tag 50940)`를 함께 기록합니다.
-   - **TIFF (16-bit)**: `IFD0`에 `Tag 34675 (ICCProfile)` 바이너리를 내장하여 포토샵·라이트룸·캡처원에서 즉시 `Adobe RGB` / `Display P3` / `BT.2020`으로 인식되게 합니다.
-   - **PNG (무손실)**: PNG 바이너리 스트림의 `IHDR` 직후에 표준 `cHRM`(원색 좌표) 및 `gAMA` 청크를 삽입하여 광색역 뷰어 호환성을 보장합니다.
-   - **JPG (98%)**: JPEG `SOI (FF D8)` 마커 직후에 표준 `APP2 (FF E2, "ICC_PROFILE\0\x01\x01")` 세그먼트로 ICC 프로파일 바이너리를 무손실 삽입합니다.
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Original Image File (Client)                    │
+│    (RAW / RW2 / DNG / TIFF / JPEG / PNG with embedded EXIF & XMP)      │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │
+                                     ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│             tiffRawDecoder.ts (Metadata Extraction Engine)             │
+│  - Parses IFD0 Tags: Make, Model, DateTime, Software, Artist, etc.     │
+│  - Parses ExifIFD Tags: ExposureTime, FNumber, ISO, LensModel, etc.    │
+│  - Captures Raw APP1 EXIF segment bytes (\xFF\xE1)                     │
+│  - Captures Raw XMP packet bytes (Tag 700 or http://ns.adobe.com...)   │
+│  - Captures Raw GPS IFD block if present                              │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │
+                                     ▼ SessionMetadata (stores enriched EXIF)
+┌────────────────────────────────────────────────────────────────────────┐
+│               sensorWorker.ts (Inpaint + Package Coordinator)          │
+│  - Performs 16-bit sensor dust inpainting on image channels            │
+│  - Forwards complete SessionMetadata to binary exporters               │
+└──────────────────┬─────────────────┬──────────────────┬────────────────┘
+                   │                 │                  │
+                   ▼                 ▼                  ▼
+┌─────────────────────────┐ ┌──────────────────┐ ┌──────────────────────┐
+│  writeLinearDngBuffer   │ │ writeTiff16Buffer│ │ injectExifAndIccTo   │
+│  (Dual-IFD DNG 1.4)     │ │ (16-bit TIFF)    │ │ Jpeg / PNG           │
+│  - IFD0 Make/Model/Date │ │ - Standard       │ │ - APP1 EXIF Segment  │
+│  - Tag 34665: ExifIFD   │ │   ExifIFD subIFD │ │ - APP1 XMP Segment   │
+│  - Tag 34853: GPS IFD   │ │ - Tag 34675: ICC │ │ - APP2 ICC Profile   │
+│  - Tag 700: XMP Packet  │ │ - Tag 700: XMP   │ │ - PNG eXIf/iTXt      │
+└─────────────────────────┘ └──────────────────┘ └──────────────────────┘
+```
 
-### D. UI 통합 (`/src/App.tsx`)
-- 상단 메타데이터 바에 현재 감지·적용된 색공간 배지(`Adobe RGB`, `Display P3`, `BT.2020` 등)를 표시합니다.
-- 우측 패널(복원 설정 섹션) 및 내보내기 드롭다운/모바일 트레이에 **색공간 선택기(`원본 유지`, `Adobe RGB`, `DCI-P3`, `BT.2020`, `ProPhoto RGB`, `sRGB`)**를 배치하여 한 번의 클릭으로 색공간을 지정하고 내보낼 수 있게 합니다.
+---
+
+## 3. Key Implementation Steps
+
+### 3.1 Metadata Extraction (`/src/engine/tiffRawDecoder.ts`)
+- **EXIF IFD 확장 태그 수집**:
+  - `LensModel` (Tag 42036 / 0xA434), `LensMake` (Tag 42035)
+  - `ShutterSpeedValue` (Tag 37377), `ApertureValue` (Tag 37378), `ExposureBiasValue` (Tag 37380)
+  - `MeteringMode` (Tag 37383), `Flash` (Tag 37385), `WhiteBalance` (Tag 41987)
+  - `FocalLengthIn35mmFilm` (Tag 41989)
+  - `Artist` (Tag 315), `Copyright` (Tag 33432), `DateTimeOriginal` (Tag 36867)
+- **JPEG APP1 Segment 추출**:
+  - `\xFF\xE1` 마커 중 `Exif\0\0` 헤더를 가진 전체 바이너리 블록 추출.
+  - `\xFF\xE1` 마커 중 `http://ns.adobe.com/xap/1.0/\0` 헤더를 가진 XMP 패킷 추출.
+- **TIFF/RAW 원본 ExifIFD 서브블록 보존**:
+  - TIFF 태그 34665(ExifIFD), 태그 700(XMP), 태그 34853(GPS IFD)의 바이트 스트림을 `SessionMetadata`에 원본 그대로 보관.
+
+### 3.2 DNG & TIFF ExifIFD Sub-Directory Builder (`/src/engine/binaryExporters.ts`)
+- **IFD0 메타데이터 강화**:
+  - 태그 271 (`Make`), 태그 272 (`Model`), 태그 306 (`DateTime`), 태그 305 (`Software`), 태그 315 (`Artist`), 태그 33432 (`Copyright`).
+- **ExifIFD (Tag 34665) 서브 IFD 자동 생성**:
+  - 노출 시간(태그 33434), 조리개(태그 33437), ISO(태그 34855), 촬영 일시(태그 36867/36868), 초점거리(태그 37386), 렌즈 모델(태그 42036) 등을 표준 규격에 맞게 인코딩하여 IFD0 내부 포인터로 연결.
+- **XMP (Tag 700) & ICC (Tag 34675) 연동**:
+  - 원본에 XMP가 있거나 추가 메타데이터가 있는 경우 태그 700으로 안전하게 연결.
+
+### 3.3 JPEG & PNG 메타데이터 바이너리 주입 (`/src/engine/binaryExporters.ts`)
+- **JPEG**:
+  - 파일 헤더 구조: `SOI (\xFF\xD8)` -> `APP1 (EXIF)` -> `APP1 (XMP)` -> `APP2 (ICC Profile)` -> DQT/SOF/SOS 이미지 스트림.
+  - 브라우저 캔버스가 잃어버리는 모든 EXIF 및 XMP를 원래 파일의 마커 세그먼트와 합성.
+- **PNG**:
+  - PNG 헤더 (`\x89PNG\r\n\x1a\n`) 바로 다음 `IHDR` 청크 뒤에 표준 `eXIf` 청크(EXIF raw bytes) 및 `iTXt` 청크(XMP 메타데이터) 삽입.
+
+### 3.4 UI 및 메타데이터 인스펙터 연동 (`/src/App.tsx`)
+- 우측 인스펙터 및 상단 헤더에 카메라 바디 및 렌즈 모델 정보 표시 (예: `Panasonic DC-G9 · LEICA DG 12-60mm`).
+- "메타데이터 보존됨" 뱃지 제공으로 사용자가 안심하고 작업할 수 있도록 피드백 제공.
+
+---
+
+## 4. Verification & Testing Plan
+
+1. **빌드 검증**:
+   - `lint_applet` 및 `compile_applet` 통과 확인 (TypeScript 0 errors).
+2. **바이너리 태그 정합성 검증**:
+   - DNG 파일: TIFF 헤더 `II (0x4949)`, IFD0의 태그 271(Make), 272(Model), 34665(ExifIFD) 오프셋 정상 점검.
+   - TIFF 파일: 16비트 포맷에서 ExifIFD 및 ICC 태그 34675 동시 존재 확인.
+   - JPEG 파일: `FF D8 FF E1 [EXIF] FF E1 [XMP] FF E2 [ICC]` 헤더 정합성 확인.
+   - PNG 파일: `eXIf` 청크 CRC32 체크섬 계산 및 유효성 확인.
+3. **윈도우 / 맥 / 모바일 호환성**:
+   - 출력된 파일을 사진 뷰어 또는 EXIF 리더에서 열었을 때 카메라 이름, 셔터, 조리개, ISO, 날짜가 완전히 표시되는지 확인.

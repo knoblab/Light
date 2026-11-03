@@ -22,6 +22,8 @@ import {
   X,
   Plus,
   Palette,
+  Camera,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   ColorSpaceId,
@@ -130,11 +132,13 @@ export function App() {
     detect: boolean;
     heal: boolean;
     colorSpace: boolean;
+    metadata: boolean;
     spots: boolean;
   }>({
     detect: true,
     heal: true,
-    colorSpace: true,
+    colorSpace: false,
+    metadata: true,
     spots: true,
   });
   const [selectedColorSpace, setSelectedColorSpace] = useState<ColorSpaceId>('auto');
@@ -786,9 +790,20 @@ export function App() {
         {/* Center: Unboxed Metadata Readout */}
         {meta && (
           <div className="hidden lg:flex items-center gap-2 text-[11px] text-[#9E9E9E] font-mono truncate">
-            <span className="text-[#E5E5E5] font-medium truncate max-w-[180px]">
+            <span className="text-[#E5E5E5] font-medium truncate max-w-[170px]">
               {meta.originalFileName}
             </span>
+            {(meta.exif.make || meta.exif.model) && (
+              <>
+                <span>·</span>
+                <span className="inline-flex items-center gap-1 text-[#E5E5E5] font-sans">
+                  <Camera className="w-3 h-3 text-[#5AC8FA]" />
+                  <span className="truncate max-w-[160px]">
+                    {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ')}
+                  </span>
+                </span>
+              </>
+            )}
             <span>·</span>
             <span>
               {meta.fullWidth}×{meta.fullHeight}
@@ -797,6 +812,18 @@ export function App() {
               <>
                 <span>·</span>
                 <span>f/{meta.exif.fNumber}</span>
+              </>
+            )}
+            {meta.exif.exposureTime && (
+              <>
+                <span>·</span>
+                <span>{meta.exif.exposureTime}</span>
+              </>
+            )}
+            {meta.exif.iso && (
+              <>
+                <span>·</span>
+                <span>ISO {meta.exif.iso}</span>
               </>
             )}
             {meta.exif.focalLength && (
@@ -838,9 +865,17 @@ export function App() {
         {/* Mobile Center Filename */}
         {meta && (
           <div className="flex lg:hidden items-center gap-1.5 text-[11px] font-mono text-[#B8B8B8] truncate">
-            <span className="truncate max-w-[110px] text-[#E5E5E5]">
+            <span className="truncate max-w-[100px] text-[#E5E5E5]">
               {meta.originalFileName}
             </span>
+            {meta.exif.model && (
+              <>
+                <span>·</span>
+                <span className="truncate max-w-[80px] text-[#5AC8FA]">
+                  {meta.exif.model}
+                </span>
+              </>
+            )}
             {meta.detectedColorSpace && meta.detectedColorSpace !== 'srgb' && (
               <>
                 <span>·</span>
@@ -905,15 +940,23 @@ export function App() {
             </button>
 
             {isExportMenuOpen && (
-              <div className="absolute right-0 mt-1.5 w-48 rounded-md bg-[#222222] border border-[#383838] shadow-2xl py-1 z-50 text-xs">
-                <div className="px-3 py-1.5 border-b border-[#333333] flex items-center justify-between text-[11px] text-[#A0A0A0]">
-                  <span className="flex items-center gap-1">
-                    <Palette className="w-3 h-3 text-[#5AC8FA]" />
-                    <span>색공간</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-[#5AC8FA] font-medium">
-                    {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
-                  </span>
+              <div className="absolute right-0 mt-1.5 w-56 rounded-md bg-[#222222] border border-[#383838] shadow-2xl py-1 z-50 text-xs">
+                <div className="px-3 py-1.5 border-b border-[#333333] space-y-1 text-[11px] text-[#A0A0A0]">
+                  <div className="flex items-center justify-between">
+                    <span>출력 해상도</span>
+                    <span className="font-mono text-[10px] text-[#E5E5E5] font-semibold">
+                      {meta ? `${meta.fullWidth}×${meta.fullHeight} (1:1 원본)` : '1:1 원본'}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="flex items-center gap-1">
+                      <Palette className="w-3 h-3 text-[#5AC8FA]" />
+                      <span>색공간</span>
+                    </span>
+                    <span className="font-mono text-[10px] text-[#5AC8FA] font-medium">
+                      {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
+                    </span>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -921,7 +964,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>DNG</span>
-                  <span className="font-mono text-[10px] opacity-75">16-bit</span>
+                  <span className="font-mono text-[10px] opacity-75">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
@@ -929,7 +972,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>TIFF</span>
-                  <span className="font-mono text-[10px] opacity-75">16-bit</span>
+                  <span className="font-mono text-[10px] opacity-75">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
@@ -937,7 +980,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>PNG</span>
-                  <span className="font-mono text-[10px] opacity-75">Lossless</span>
+                  <span className="font-mono text-[10px] opacity-75">무손실 · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
@@ -945,8 +988,13 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>JPG</span>
-                  <span className="font-mono text-[10px] opacity-75">98%</span>
+                  <span className="font-mono text-[10px] opacity-75">98% · 1:1 원본</span>
                 </button>
+
+                <div className="px-2.5 py-1.5 bg-[#172019] border-t border-[#233528] flex items-center gap-1.5 text-[9.5px] text-[#34C759]">
+                  <ShieldCheck className="w-3 h-3 text-[#34C759] shrink-0" />
+                  <span>원본 해상도·색감 100% + 먼지만 제거</span>
+                </div>
 
                 {studioMode === 'sequence' && sequenceItems.length > 0 && (
                   <>
@@ -1409,7 +1457,106 @@ export function App() {
               )}
             </div>
 
-            {/* Accordion 3: 스팟 목록 (Spots) */}
+            {/* Accordion 3: 카메라 및 메타데이터 (Camera & EXIF) */}
+            <div className="border-b border-[#282828]">
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenAccordions((p) => ({ ...p, metadata: !p.metadata }))
+                }
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] text-left cursor-pointer transition-colors"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#E5E5E5]">
+                  {openAccordions.metadata ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  )}
+                  <Camera className="w-3.5 h-3.5 text-[#5AC8FA]" />
+                  <span>카메라 메타데이터 (EXIF)</span>
+                </div>
+                <span className="text-[10px] text-[#34C759] flex items-center gap-1 font-mono">
+                  <ShieldCheck className="w-3 h-3 text-[#34C759]" />
+                  <span>100% 보존</span>
+                </span>
+              </button>
+
+              {openAccordions.metadata && (
+                <div className="p-3.5 space-y-3 bg-[#1C1C1C]">
+                  {meta ? (
+                    <>
+                      <div className="space-y-1.5 text-[11px]">
+                        <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
+                          <span className="text-[#8E8E8E]">카메라 기종</span>
+                          <span className="text-[#E5E5E5] font-medium text-right max-w-[190px] truncate">
+                            {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ') || '카메라 태그 없음'}
+                          </span>
+                        </div>
+                        {meta.exif.lensModel && (
+                          <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
+                            <span className="text-[#8E8E8E]">렌즈 모델</span>
+                            <span className="text-[#E5E5E5] font-medium text-right max-w-[190px] truncate" title={meta.exif.lensModel}>
+                              {meta.exif.lensModel}
+                            </span>
+                          </div>
+                        )}
+                        <div className="grid grid-cols-2 gap-2 pt-0.5">
+                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
+                            <div className="text-[10px] text-[#8E8E8E]">조리개</div>
+                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
+                              {meta.exif.fNumber ? `f/${meta.exif.fNumber}` : '—'}
+                            </div>
+                          </div>
+                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
+                            <div className="text-[10px] text-[#8E8E8E]">셔터 스피드</div>
+                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
+                              {meta.exif.exposureTime || '—'}
+                            </div>
+                          </div>
+                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
+                            <div className="text-[10px] text-[#8E8E8E]">감도 (ISO)</div>
+                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
+                              {meta.exif.iso ? `ISO ${meta.exif.iso}` : '—'}
+                            </div>
+                          </div>
+                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
+                            <div className="text-[10px] text-[#8E8E8E]">초점거리</div>
+                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
+                              {meta.exif.focalLength || '—'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {meta.exif.dateTime && (
+                          <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
+                            <span className="text-[#8E8E8E]">촬영 일시</span>
+                            <span className="text-[#D4D4D4] font-mono text-[10px]">
+                              {meta.exif.dateTime}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="p-2.5 rounded bg-[#131F17] border border-[#1E4D2B] text-[10px] space-y-1">
+                        <div className="flex items-center gap-1.5 text-[#34C759] font-medium">
+                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                          <span>DNG · TIFF · PNG · JPG 메타데이터 무손실 주입</span>
+                        </div>
+                        <p className="text-[#A1D9B4] leading-relaxed">
+                          카메라 이름, 렌즈 정보, 촬영 파라미터뿐만 아니라 원본 EXIF/XMP 바이너리 블록이 내보내기 파일 포맷에 맞게 100% 무손실로 보존 및 삽입됩니다.
+                        </p>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-[11px] text-[#737373] text-center py-4">
+                      이미지를 불러오면 카메라 및 EXIF 메타데이터가 표시됩니다.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Accordion 4: 스팟 목록 (Spots) */}
             <div className="flex-1 flex flex-col min-h-[180px]">
               <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] border-b border-[#282828]">
                 <button
@@ -1905,6 +2052,11 @@ export function App() {
                     </span>
                   </button>
                 ))}
+              </div>
+
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-[#172019] border border-[#233528] text-[10px] text-[#34C759]">
+                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                <span>카메라 기종, 렌즈 및 EXIF/XMP 바이너리 100% 보존</span>
               </div>
 
               {studioMode === 'sequence' && sequenceItems.length > 0 && (

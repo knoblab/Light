@@ -1,4 +1,5 @@
 import { ColorSpaceId, ExifMetadata } from '../types/sensor';
+import * as UTIF from 'utif';
 
 export interface DecodedImagePayload {
   fullWidth: number;
@@ -48,27 +49,36 @@ export const SRGB8_TO_SRGB16_LUT = new Uint16Array(256);
 })();
 
 interface TiffIfdSummary {
+  subfileType: number;
   width: number;
   height: number;
+  sensorFullWidth: number;
+  sensorFullHeight: number;
   bitsPerSample: number[];
   compression: number;
   photometric: number;
   samplesPerPixel: number;
   stripOffsets: number[];
   stripByteCounts: number[];
+  tileOffsets: number[];
+  tileByteCounts: number[];
   jpegOffset: number;
   jpegLength: number;
   rw2JpgFromRawOffset: number;
   rw2JpgFromRawLength: number;
   subIfdOffsets: number[];
   exifIfdOffset: number;
+  gpsIfdOffset?: number;
   orientation: number;
   make?: string;
   model?: string;
   dateTime?: string;
   software?: string;
+  artist?: string;
+  copyright?: string;
   iccProfileBytes?: Uint8Array;
   colorSpaceTag?: number;
+  rawXmpBytes?: Uint8Array;
 }
 
 function readAscii(view: DataView, offset: number, count: number): string {
@@ -162,6 +172,165 @@ export function extractJpegIccProfile(bytes: Uint8Array): Uint8Array | null {
   return fullIcc.length >= 128 ? fullIcc : null;
 }
 
+/**
+ * Extracts raw APP1 EXIF segment and raw APP1 XMP segment from a JPEG byte stream.
+ */
+export function extractJpegExifAndXmpSegments(bytes: Uint8Array): {
+  rawApp1ExifBytes?: Uint8Array;
+  rawXmpBytes?: Uint8Array;
+} {
+  const len = bytes.length;
+  let rawApp1ExifBytes: Uint8Array | undefined;
+  let rawXmpBytes: Uint8Array | undefined;
+
+  for (let i = 0; i < len - 16; i++) {
+    if (bytes[i] === 0xff && bytes[i + 1] === 0xe1) {
+      const segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (segLen < 8 || i + 2 + segLen > len) continue;
+
+      // Check for "Exif\0\0"
+      if (
+        bytes[i + 4] === 0x45 &&
+        bytes[i + 5] === 0x78 &&
+        bytes[i + 6] === 0x69 &&
+        bytes[i + 7] === 0x66 &&
+        bytes[i + 8] === 0x00 &&
+        bytes[i + 9] === 0x00
+      ) {
+        if (!rawApp1ExifBytes) {
+          rawApp1ExifBytes = bytes.subarray(i, i + 2 + segLen).slice();
+        }
+      } else if (
+        // Check for "http://ns.adobe.com/xap/1.0/\0"
+        bytes[i + 4] === 0x68 &&
+        bytes[i + 5] === 0x74 &&
+        bytes[i + 6] === 0x74 &&
+        bytes[i + 7] === 0x70
+      ) {
+        if (!rawXmpBytes) {
+          rawXmpBytes = bytes.subarray(i + 4, i + 2 + segLen).slice();
+        }
+      }
+      i += 1 + segLen;
+    } else if (bytes[i] === 0xff && bytes[i + 1] === 0xda) {
+      break;
+    }
+  }
+
+  return { rawApp1ExifBytes, rawXmpBytes };
+}
+
+/**
+ * Parses a standalone TIFF-structured EXIF buffer (e.g. from JPEG APP1 or PNG eXIf chunk).
+ */
+export function parseTiffExifBlock(tiffBytes: Uint8Array, exifOut: ExifMetadata): void {
+  if (tiffBytes.length < 16) return;
+  const isLittle = tiffBytes[0] === 0x49 && tiffBytes[1] === 0x49;
+  const isBig = tiffBytes[0] === 0x4d && tiffBytes[1] === 0x4d;
+  if (!isLittle && !isBig) return;
+
+  const view = new DataView(tiffBytes.buffer, tiffBytes.byteOffset, tiffBytes.byteLength);
+  const magic = view.getUint16(2, isLittle);
+  if (magic !== 42) return;
+
+  const firstIfdOffset = view.getUint32(4, isLittle);
+  if (firstIfdOffset <= 0 || firstIfdOffset >= tiffBytes.length) return;
+
+  const parsed = parseSingleIfd(view, firstIfdOffset, isLittle);
+  if (!parsed) return;
+  const { summary } = parsed;
+
+  if (summary.make && (!exifOut.make || exifOut.make === 'Unknown' || exifOut.make === 'Camera')) {
+    exifOut.make = summary.make;
+  }
+  if (summary.model && (!exifOut.model || exifOut.model === 'Camera Sensor' || exifOut.model.endsWith('Sensor'))) {
+    exifOut.model = summary.model;
+  }
+  if (summary.dateTime && !exifOut.dateTime) {
+    exifOut.dateTime = summary.dateTime;
+  }
+  if (summary.software && !exifOut.software) {
+    exifOut.software = summary.software;
+  }
+  if (summary.artist && !exifOut.artist) {
+    exifOut.artist = summary.artist;
+  }
+  if (summary.copyright && !exifOut.copyright) {
+    exifOut.copyright = summary.copyright;
+  }
+  if (summary.rawXmpBytes && !exifOut.rawXmpBytes) {
+    exifOut.rawXmpBytes = summary.rawXmpBytes;
+  }
+
+  if (summary.exifIfdOffset > 0) {
+    parseExifSubIfd(view, summary.exifIfdOffset, isLittle, exifOut);
+  }
+}
+
+/**
+ * Scans a PNG buffer for eXIf and iTXt/tEXt (XMP) metadata chunks.
+ */
+export function extractPngExifAndXmp(bytes: Uint8Array, exifOut: ExifMetadata): void {
+  if (bytes.length < 16) return;
+  // PNG signature: \x89PNG\r\n\x1a\n
+  if (
+    bytes[0] !== 0x89 ||
+    bytes[1] !== 0x50 ||
+    bytes[2] !== 0x4e ||
+    bytes[3] !== 0x47 ||
+    bytes[4] !== 0x0d ||
+    bytes[5] !== 0x0a ||
+    bytes[6] !== 0x1a ||
+    bytes[7] !== 0x0a
+  ) {
+    return;
+  }
+
+  let offset = 8;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  while (offset + 12 <= bytes.length) {
+    const chunkLen = view.getUint32(offset, false);
+    const chunkType = String.fromCharCode(
+      bytes[offset + 4],
+      bytes[offset + 5],
+      bytes[offset + 6],
+      bytes[offset + 7]
+    );
+
+    if (chunkType === 'eXIf' && chunkLen >= 14) {
+      const exifData = bytes.subarray(offset + 8, offset + 8 + chunkLen);
+      if (!exifOut.rawApp1ExifBytes) {
+        const app1 = new Uint8Array(chunkLen + 10);
+        app1[0] = 0xff;
+        app1[1] = 0xe1;
+        const segLen = chunkLen + 8;
+        app1[2] = (segLen >> 8) & 0xff;
+        app1[3] = segLen & 0xff;
+        app1[4] = 0x45;
+        app1[5] = 0x78;
+        app1[6] = 0x69;
+        app1[7] = 0x66;
+        app1[8] = 0x00;
+        app1[9] = 0x00;
+        app1.set(exifData, 10);
+        exifOut.rawApp1ExifBytes = app1;
+      }
+      parseTiffExifBlock(exifData, exifOut);
+    } else if (chunkType === 'iTXt' || chunkType === 'tEXt') {
+      const chunkData = bytes.subarray(offset + 8, offset + 8 + chunkLen);
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(chunkData);
+      if (text.includes('XML:com.adobe.xmp') && !exifOut.rawXmpBytes) {
+        exifOut.rawXmpBytes = chunkData.slice();
+      }
+    } else if (chunkType === 'IEND') {
+      break;
+    }
+
+    offset += 12 + chunkLen;
+  }
+}
+
 function readTagValues(
   view: DataView,
   littleEndian: boolean,
@@ -227,14 +396,19 @@ function parseSingleIfd(
   }
 
   const summary: TiffIfdSummary = {
+    subfileType: 0,
     width: 0,
     height: 0,
+    sensorFullWidth: 0,
+    sensorFullHeight: 0,
     bitsPerSample: [],
     compression: 1,
     photometric: 2,
     samplesPerPixel: 3,
     stripOffsets: [],
     stripByteCounts: [],
+    tileOffsets: [],
+    tileByteCounts: [],
     jpegOffset: 0,
     jpegLength: 0,
     rw2JpgFromRawOffset: 0,
@@ -269,6 +443,17 @@ function parseSingleIfd(
         else if (tag === 272 && strVal) summary.model = strVal;
         else if (tag === 305 && strVal) summary.software = strVal;
         else if (tag === 306 && strVal) summary.dateTime = strVal;
+        else if (tag === 315 && strVal) summary.artist = strVal;
+        else if (tag === 33432 && strVal) summary.copyright = strVal;
+      }
+      continue;
+    }
+
+    if (tag === 700 && count > 10) {
+      // XMP metadata packet
+      const dataOffset = count <= 4 ? valPos : view.getUint32(valPos, littleEndian);
+      if (dataOffset > 0 && dataOffset + count <= view.byteLength) {
+        summary.rawXmpBytes = new Uint8Array(view.buffer, view.byteOffset + dataOffset, count).slice();
       }
       continue;
     }
@@ -286,11 +471,36 @@ function parseSingleIfd(
     if (vals.length === 0) continue;
 
     switch (tag) {
+      case 254: // NewSubfileType
+        summary.subfileType = vals[0];
+        break;
       case 256: // ImageWidth
         summary.width = vals[0];
         break;
       case 257: // ImageLength
         summary.height = vals[0];
+        break;
+      case 0x0002: // Panasonic SensorWidth
+        if (vals[0] > summary.sensorFullWidth && summary.sensorFullWidth === 0) {
+          summary.sensorFullWidth = vals[0];
+        }
+        break;
+      case 0x0003: // Panasonic SensorHeight
+        if (vals[0] > summary.sensorFullHeight && summary.sensorFullHeight === 0) {
+          summary.sensorFullHeight = vals[0];
+        }
+        break;
+      case 0x0006: // Panasonic ImageHeight / CropBottom
+        if (vals[0] > 400) summary.sensorFullHeight = vals[0];
+        break;
+      case 0x0007: // Panasonic ImageWidth / CropRight
+        if (vals[0] > 400) summary.sensorFullWidth = vals[0];
+        break;
+      case 50720: // DNG DefaultCropSize
+        if (vals.length >= 2) {
+          summary.sensorFullWidth = Math.round(vals[0]);
+          summary.sensorFullHeight = Math.round(vals[1]);
+        }
         break;
       case 258: // BitsPerSample
         summary.bitsPerSample = vals;
@@ -313,6 +523,12 @@ function parseSingleIfd(
       case 279: // StripByteCounts
         summary.stripByteCounts = vals;
         break;
+      case 324: // TileOffsets
+        summary.tileOffsets = vals;
+        break;
+      case 325: // TileByteCounts
+        summary.tileByteCounts = vals;
+        break;
       case 330: // SubIFDs
         summary.subIfdOffsets = vals;
         break;
@@ -324,6 +540,9 @@ function parseSingleIfd(
         break;
       case 34665: // ExifIFD
         summary.exifIfdOffset = vals[0];
+        break;
+      case 34853: // GPSInfo
+        summary.gpsIfdOffset = vals[0];
         break;
       case 40961: // ColorSpace
         summary.colorSpaceTag = vals[0];
@@ -343,8 +562,10 @@ function parseExifSubIfd(
   exifOffset: number,
   littleEndian: boolean,
   exifOut: ExifMetadata
-): { colorSpaceTag?: number } {
+): { colorSpaceTag?: number; exifImageWidth?: number; exifImageHeight?: number } {
   let colorSpaceTag: number | undefined;
+  let exifImageWidth: number | undefined;
+  let exifImageHeight: number | undefined;
   if (exifOffset <= 0 || exifOffset + 2 > view.byteLength) return { colorSpaceTag };
   const numEntries = view.getUint16(exifOffset, littleEndian);
   if (numEntries <= 0 || numEntries > 512 || exifOffset + 2 + numEntries * 12 > view.byteLength) {
@@ -364,6 +585,10 @@ function parseExifSubIfd(
         const strVal = readAscii(view, strOffset, count);
         if ((tag === 36867 || tag === 36868) && strVal && !exifOut.dateTime) {
           exifOut.dateTime = strVal;
+        } else if (tag === 42036 && strVal) {
+          exifOut.lensModel = strVal;
+        } else if (tag === 42035 && strVal) {
+          exifOut.lensMake = strVal;
         }
       }
       continue;
@@ -395,22 +620,95 @@ function parseExifSubIfd(
     } else if (tag === 37386 && vals[0] > 0) {
       // FocalLength
       exifOut.focalLength = `${Math.round(vals[0] * 10) / 10}mm`;
+    } else if (tag === 37377) {
+      // ShutterSpeedValue
+      exifOut.shutterSpeedValue = vals[0];
+    } else if (tag === 37378) {
+      // ApertureValue
+      exifOut.apertureValue = vals[0];
+    } else if (tag === 37380) {
+      // ExposureBiasValue
+      exifOut.exposureBiasValue = vals[0];
+    } else if (tag === 37383) {
+      // MeteringMode
+      exifOut.meteringMode = vals[0];
+    } else if (tag === 37385) {
+      // Flash
+      exifOut.flash = vals[0];
+    } else if (tag === 41987) {
+      // WhiteBalance
+      exifOut.whiteBalanceMode = vals[0];
+    } else if (tag === 41989) {
+      // FocalLengthIn35mmFilm
+      exifOut.focalLengthIn35mm = vals[0];
     } else if (tag === 40961) {
       // ColorSpace: 1=sRGB, 2=Adobe RGB, 65535=Uncalibrated/Wide
       colorSpaceTag = vals[0];
+    } else if (tag === 40962 && vals[0] > 0) {
+      // PixelXDimension
+      exifImageWidth = vals[0];
+    } else if (tag === 40963 && vals[0] > 0) {
+      // PixelYDimension
+      exifImageHeight = vals[0];
     }
   }
 
-  return { colorSpaceTag };
+  return { colorSpaceTag, exifImageWidth, exifImageHeight };
 }
 
 /**
- * Scans an ArrayBuffer for the largest valid embedded JPEG stream (\xFF\xD8\xFF ... \xFF\xD9).
- * Used as a universal fallback for any camera RAW container (.RW2, .RAF, .CR3, .ORF, .NEF, .ARW).
+ * Reads JPEG Start-Of-Frame (SOF0 / SOF1 / SOF2) dimensions directly from a JPEG byte stream
+ * without decoding pixels, so we can rank embedded JPEGs by true pixel resolution (width * height).
+ */
+export function getJpegDimensionsFromBytes(jpegBytes: Uint8Array): { width: number; height: number } | null {
+  const len = jpegBytes.length;
+  if (len < 16 || jpegBytes[0] !== 0xff || jpegBytes[1] !== 0xd8) return null;
+
+  let pos = 2;
+  while (pos + 9 < len) {
+    if (jpegBytes[pos] !== 0xff) {
+      pos++;
+      continue;
+    }
+    while (pos < len && jpegBytes[pos] === 0xff) pos++;
+    if (pos + 7 >= len) break;
+    const marker = jpegBytes[pos];
+    pos++;
+
+    if (marker === 0xd8 || marker === 0x00 || (marker >= 0xd0 && marker <= 0xd7)) {
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) {
+      break;
+    }
+
+    const segLen = (jpegBytes[pos] << 8) | jpegBytes[pos + 1];
+    if (segLen < 2 || pos + segLen > len) break;
+
+    // SOF0 (0xC0), SOF1 (0xC1), SOF2 (0xC2) — baseline / extended / progressive DCT
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      const height = (jpegBytes[pos + 3] << 8) | jpegBytes[pos + 4];
+      const width = (jpegBytes[pos + 5] << 8) | jpegBytes[pos + 6];
+      if (width > 0 && height > 0) {
+        return { width, height };
+      }
+    }
+
+    pos += segLen;
+  }
+  return null;
+}
+
+/**
+ * Scans an ArrayBuffer for ALL valid embedded JPEG streams (\xFF\xD8\xFF ... \xFF\xD9)
+ * and returns the one with the highest pixel resolution (width * height), or largest byte size if equal.
+ * Note: We do NOT jump the outer loop past EOI before checking nested JPEGs because JPEG APP1 EXIF
+ * blocks often contain a tiny 160x120 thumbnail JPEG whose SOI precedes the main JPEG's EOI!
  */
 function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
   let bestStart = -1;
   let bestEnd = -1;
+  let bestPixels = 0;
   let bestLen = 0;
 
   const len = bytes.length;
@@ -419,9 +717,10 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
     if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) {
       const m = bytes[i + 3];
       if ((m >= 0xe0 && m <= 0xef) || m === 0xdb || m === 0xc0 || m === 0xc2 || m === 0xc4) {
-        // Walk JPEG segments or search forward for matching EOI
         let pos = i + 2;
-        let foundSos = false;
+        let foundWidth = 0;
+        let foundHeight = 0;
+
         while (pos < len - 4) {
           if (bytes[pos] !== 0xff) {
             pos++;
@@ -433,14 +732,6 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
           pos++;
 
           if (marker === 0xd9) {
-            if (foundSos) {
-              const candidateLen = pos - i;
-              if (candidateLen > bestLen) {
-                bestLen = candidateLen;
-                bestStart = i;
-                bestEnd = pos;
-              }
-            }
             break;
           }
           if (marker === 0xd8 || marker === 0x00 || (marker >= 0xd0 && marker <= 0xd7)) {
@@ -449,21 +740,30 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
           if (pos + 2 > len) break;
           const segLen = (bytes[pos] << 8) | bytes[pos + 1];
           if (segLen < 2 || pos + segLen > len) break;
+
+          if ((marker === 0xc0 || marker === 0xc1 || marker === 0xc2) && pos + 7 <= len) {
+            foundHeight = (bytes[pos + 3] << 8) | bytes[pos + 4];
+            foundWidth = (bytes[pos + 5] << 8) | bytes[pos + 6];
+          }
+
           if (marker === 0xda) {
             // Start of Scan (SOS) — entropy coded data follows until FF D9
-            foundSos = true;
             pos += segLen;
             while (pos < len - 1) {
               if (bytes[pos] === 0xff && bytes[pos + 1] === 0xd9) {
                 pos += 2;
                 const candidateLen = pos - i;
-                if (candidateLen > bestLen) {
+                const candidatePixels = foundWidth * foundHeight;
+                if (
+                  candidateLen > 8192 &&
+                  (candidatePixels > bestPixels ||
+                    (candidatePixels === bestPixels && candidateLen > bestLen))
+                ) {
+                  bestPixels = candidatePixels;
                   bestLen = candidateLen;
                   bestStart = i;
                   bestEnd = pos;
                 }
-                // Advance outer loop past this full JPEG stream
-                i = pos - 1;
                 break;
               }
               pos++;
@@ -479,6 +779,61 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
 
   if (bestStart >= 0 && bestEnd > bestStart && bestLen > 8192) {
     return bytes.subarray(bestStart, bestEnd);
+  }
+  return null;
+}
+
+/**
+ * Decodes compressed TIFF / DNG / RAW IFDs using UTIF when standard uncompressed strip copy is not applicable
+ * (e.g. LZW, Deflate/ZIP, PackBits, or Lossless JPEG compressed DNG/TIFF).
+ */
+function decodeWithUtifFallback(
+  buffer: ArrayBuffer
+): { width: number; height: number; rgb8: Uint8Array } | null {
+  try {
+    const ifds = UTIF.decode(buffer);
+    if (!ifds || ifds.length === 0) return null;
+
+    // Collect all candidate IFDs (including SubIFDs) and pick the highest resolution RGB image
+    const allIfds: any[] = [];
+    for (const ifd of ifds) {
+      allIfds.push(ifd);
+      if (ifd.subIFD && Array.isArray(ifd.subIFD)) {
+        for (const sub of ifd.subIFD) {
+          allIfds.push(sub);
+        }
+      }
+    }
+
+    // Sort by pixel area descending
+    allIfds.sort((a, b) => {
+      const areaA = (a.width || a.t256?.[0] || 0) * (a.height || a.t257?.[0] || 0);
+      const areaB = (b.width || b.t256?.[0] || 0) * (b.height || b.t257?.[0] || 0);
+      return areaB - areaA;
+    });
+
+    for (const candidate of allIfds) {
+      try {
+        UTIF.decodeImage(buffer, candidate);
+        const w = candidate.width || 0;
+        const h = candidate.height || 0;
+        if (w <= 0 || h <= 0 || !candidate.data) continue;
+        const rgba = UTIF.toRGBA8(candidate);
+        if (!rgba || rgba.length < w * h * 4) continue;
+        const numPixels = w * h;
+        const rgb8 = new Uint8Array(numPixels * 3);
+        for (let i = 0, j = 0; i < numPixels * 4; i += 4, j += 3) {
+          rgb8[j] = rgba[i];
+          rgb8[j + 1] = rgba[i + 1];
+          rgb8[j + 2] = rgba[i + 2];
+        }
+        return { width: w, height: h, rgb8 };
+      } catch {
+        // Try next IFD
+      }
+    }
+  } catch {
+    // Ignore UTIF fallback failure
   }
   return null;
 }
@@ -571,9 +926,12 @@ function decodeUncompressedIfdPixels(
 /**
  * Decodes a JPEG/PNG/WebP Blob into an exact RGB8 Uint8Array using createImageBitmap + OffscreenCanvas
  * with colorSpaceConversion: 'none' to preserve 100% of the original file's color and contrast.
+ * If targetWidth & targetHeight are specified and larger than the embedded preview, scales with high quality to match the native sensor dimensions.
  */
 async function decodeBlobToRgb8(
-  blob: Blob
+  blob: Blob,
+  targetWidth?: number,
+  targetHeight?: number
 ): Promise<{ width: number; height: number; rgb8: Uint8Array }> {
   let bitmap: ImageBitmap;
   try {
@@ -585,15 +943,37 @@ async function decodeBlobToRgb8(
     bitmap = await createImageBitmap(blob);
   }
 
-  const width = bitmap.width;
-  const height = bitmap.height;
+  let width = bitmap.width;
+  let height = bitmap.height;
+
+  if (
+    targetWidth &&
+    targetHeight &&
+    targetWidth * targetHeight > width * height &&
+    targetWidth <= 12000 &&
+    targetHeight <= 12000
+  ) {
+    // Match orientation (landscape vs portrait) of decoded bitmap
+    const bmpIsPortrait = height > width;
+    const tgtIsPortrait = targetHeight > targetWidth;
+    if (bmpIsPortrait === tgtIsPortrait) {
+      width = targetWidth;
+      height = targetHeight;
+    } else {
+      width = targetHeight;
+      height = targetWidth;
+    }
+  }
+
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) {
     bitmap.close();
     throw new Error('OffscreenCanvas 2D 컨텍스트를 생성할 수 없습니다.');
   }
-  ctx.drawImage(bitmap, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bitmap, 0, 0, width, height);
   bitmap.close();
 
   const imgData = ctx.getImageData(0, 0, width, height);
@@ -832,8 +1212,24 @@ export async function decodeImageFileLocal(
   let uncompressed16: { width: number; height: number; rgb16: Uint16Array } | null = null;
   let uncompressed8: { width: number; height: number; rgb8: Uint8Array } | null = null;
   let bestEmbeddedJpegBytes: Uint8Array | null = null;
+  let bestEmbeddedJpegPixels = 0;
+  let maxSensorWidth = 0;
+  let maxSensorHeight = 0;
   let detectedIccBytes: Uint8Array | undefined = undefined;
   let detectedColorSpace: ColorSpaceId = isRaw ? 'adobe-rgb' : 'srgb';
+
+  const considerCandidateJpeg = (candBytes: Uint8Array) => {
+    if (!candBytes || candBytes.length < 4096) return;
+    const dims = getJpegDimensionsFromBytes(candBytes);
+    const pixels = dims ? dims.width * dims.height : 0;
+    if (
+      pixels > bestEmbeddedJpegPixels ||
+      (pixels === bestEmbeddedJpegPixels && candBytes.length > (bestEmbeddedJpegBytes?.length || 0))
+    ) {
+      bestEmbeddedJpegPixels = pixels;
+      bestEmbeddedJpegBytes = candBytes;
+    }
+  };
 
   // Parse TIFF / RW2 / DNG / RAW IFD tree if header is II/MM (magic 42 standard TIFF, 85 Panasonic RW2, 0x4F52 Olympus ORF)
   if (littleEndian !== null && (magic === 42 || magic === 85 || magic === 0x4f52 || magic === 0x5352)) {
@@ -849,6 +1245,19 @@ export async function decodeImageFileLocal(
       const parsed = parseSingleIfd(view, curOffset, littleEndian);
       if (!parsed) continue;
       const { summary, nextIfdOffset } = parsed;
+
+      if (summary.sensorFullWidth > 0 && summary.sensorFullHeight > 0) {
+        if (summary.sensorFullWidth * summary.sensorFullHeight > maxSensorWidth * maxSensorHeight) {
+          maxSensorWidth = summary.sensorFullWidth;
+          maxSensorHeight = summary.sensorFullHeight;
+        }
+      }
+      if (summary.subfileType === 0 && summary.width > 0 && summary.height > 0) {
+        if (summary.width * summary.height > maxSensorWidth * maxSensorHeight) {
+          maxSensorWidth = summary.width;
+          maxSensorHeight = summary.height;
+        }
+      }
 
       if (summary.iccProfileBytes && !detectedIccBytes) {
         detectedIccBytes = summary.iccProfileBytes;
@@ -867,33 +1276,51 @@ export async function decodeImageFileLocal(
       if (summary.dateTime && !exif.dateTime) {
         exif.dateTime = summary.dateTime;
       }
+      if (summary.software && !exif.software) {
+        exif.software = summary.software;
+      }
+      if (summary.artist && !exif.artist) {
+        exif.artist = summary.artist;
+      }
+      if (summary.copyright && !exif.copyright) {
+        exif.copyright = summary.copyright;
+      }
+      if (summary.rawXmpBytes && !exif.rawXmpBytes) {
+        exif.rawXmpBytes = summary.rawXmpBytes;
+      }
       if (summary.exifIfdOffset > 0) {
         const subRes = parseExifSubIfd(view, summary.exifIfdOffset, littleEndian, exif);
         if (subRes.colorSpaceTag === 2) {
           detectedColorSpace = 'adobe-rgb';
         }
+        if (
+          subRes.exifImageWidth &&
+          subRes.exifImageHeight &&
+          subRes.exifImageWidth * subRes.exifImageHeight > maxSensorWidth * maxSensorHeight
+        ) {
+          maxSensorWidth = subRes.exifImageWidth;
+          maxSensorHeight = subRes.exifImageHeight;
+        }
       }
 
       // Check for Panasonic RW2 JpgFromRaw (Tag 0x002E)
-      if (
-        summary.rw2JpgFromRawOffset > 0 &&
-        summary.rw2JpgFromRawLength > (bestEmbeddedJpegBytes?.length || 0)
-      ) {
-        bestEmbeddedJpegBytes = bytes.subarray(
-          summary.rw2JpgFromRawOffset,
-          summary.rw2JpgFromRawOffset + summary.rw2JpgFromRawLength
+      if (summary.rw2JpgFromRawOffset > 0 && summary.rw2JpgFromRawLength > 1024) {
+        considerCandidateJpeg(
+          bytes.subarray(
+            summary.rw2JpgFromRawOffset,
+            summary.rw2JpgFromRawOffset + summary.rw2JpgFromRawLength
+          )
         );
       }
 
       // Check for JPEGInterchangeFormat (Tag 513 / 514)
       if (
         summary.jpegOffset > 0 &&
-        summary.jpegLength > (bestEmbeddedJpegBytes?.length || 0) &&
+        summary.jpegLength > 1024 &&
         summary.jpegOffset + summary.jpegLength <= buffer.byteLength
       ) {
-        bestEmbeddedJpegBytes = bytes.subarray(
-          summary.jpegOffset,
-          summary.jpegOffset + summary.jpegLength
+        considerCandidateJpeg(
+          bytes.subarray(summary.jpegOffset, summary.jpegOffset + summary.jpegLength)
         );
       }
 
@@ -907,12 +1334,12 @@ export async function decodeImageFileLocal(
         const sLen = summary.stripByteCounts[0];
         if (
           sOff > 0 &&
-          sLen > (bestEmbeddedJpegBytes?.length || 0) &&
+          sLen > 1024 &&
           sOff + sLen <= buffer.byteLength &&
           bytes[sOff] === 0xff &&
           bytes[sOff + 1] === 0xd8
         ) {
-          bestEmbeddedJpegBytes = bytes.subarray(sOff, sOff + sLen);
+          considerCandidateJpeg(bytes.subarray(sOff, sOff + sLen));
         }
       }
 
@@ -931,6 +1358,7 @@ export async function decodeImageFileLocal(
             };
           }
         } else if (decodedIfd.rgb8) {
+          // Only use uncompressed8 as primary if it is NOT a tiny reduced-res thumbnail when a higher-res SubIFD exists
           if (
             !uncompressed8 ||
             decodedIfd.width * decodedIfd.height > uncompressed8.width * uncompressed8.height
@@ -950,6 +1378,15 @@ export async function decodeImageFileLocal(
       if (nextIfdOffset > 0) {
         queue.push(nextIfdOffset);
       }
+    }
+  }
+
+  // Also scan the entire RAW container for any higher-resolution embedded JPEG stream
+  // (e.g., Nikon NEF, Sony ARW, Canon CR2/CR3, Fujifilm RAF, Olympus ORF often store full-res JPEGs outside IFD0)
+  if (isRaw) {
+    const scannedJpg = findLargestEmbeddedJpeg(bytes);
+    if (scannedJpg) {
+      considerCandidateJpeg(scannedJpg);
     }
   }
 
@@ -988,8 +1425,24 @@ export async function decodeImageFileLocal(
     };
   }
 
-  // Case 2: Uncompressed 8-bit TIFF
-  if (uncompressed8 && !isRaw) {
+  // If this is a compressed TIFF or compressed DNG where uncompressed strip decoding wasn't applicable,
+  // try UTIF full-resolution decoder if it yields higher resolution than any embedded preview JPEG.
+  if (littleEndian !== null && !uncompressed8) {
+    const utifDecoded = decodeWithUtifFallback(buffer);
+    if (
+      utifDecoded &&
+      utifDecoded.width * utifDecoded.height > bestEmbeddedJpegPixels
+    ) {
+      uncompressed8 = utifDecoded;
+    }
+  }
+
+  // Case 2: Uncompressed or UTIF-decoded 8-bit TIFF / DNG (when higher res than embedded JPEG)
+  if (
+    uncompressed8 &&
+    (!bestEmbeddedJpegBytes ||
+      uncompressed8.width * uncompressed8.height >= bestEmbeddedJpegPixels)
+  ) {
     const numPixels = uncompressed8.width * uncompressed8.height;
     const linear16 = new Uint16Array(numPixels * 3);
     const src8 = uncompressed8.rgb8;
@@ -1004,7 +1457,7 @@ export async function decodeImageFileLocal(
       lut16ToOrig8R: LINEAR16_TO_SRGB8_LUT,
       lut16ToOrig8G: LINEAR16_TO_SRGB8_LUT,
       lut16ToOrig8B: LINEAR16_TO_SRGB8_LUT,
-      isRaw: false,
+      isRaw,
       extension: ext.toUpperCase(),
       exposureScale: 1.0,
       detectedColorSpace,
@@ -1013,15 +1466,10 @@ export async function decodeImageFileLocal(
     };
   }
 
-  // Case 3: Camera RAW (.RW2, .CR2, .CR3, .NEF, .ARW, .ORF, .PEF, .RAF, compressed .DNG)
-  // Extract the camera's full-resolution embedded preview (which contains the exact camera ISP color profile & S-curve)
-  if (!bestEmbeddedJpegBytes && isRaw) {
-    bestEmbeddedJpegBytes = findLargestEmbeddedJpeg(bytes);
-  }
+  const targetJpg = bestEmbeddedJpegBytes || bytes;
 
   // Check for JPEG APP2 ICC profile in either embedded JPEG or standalone image
   if (!detectedIccBytes) {
-    const targetJpg = bestEmbeddedJpegBytes || bytes;
     const jpgIcc = extractJpegIccProfile(targetJpg);
     if (jpgIcc) {
       detectedIccBytes = jpgIcc;
@@ -1029,16 +1477,39 @@ export async function decodeImageFileLocal(
     }
   }
 
+  // Extract JPEG/RAW embedded preview APP1 EXIF and XMP
+  const { rawApp1ExifBytes, rawXmpBytes } = extractJpegExifAndXmpSegments(targetJpg);
+  if (rawApp1ExifBytes && !exif.rawApp1ExifBytes) {
+    exif.rawApp1ExifBytes = rawApp1ExifBytes;
+    if (rawApp1ExifBytes.length > 10) {
+      parseTiffExifBlock(rawApp1ExifBytes.subarray(10), exif);
+    }
+  }
+  if (rawXmpBytes && !exif.rawXmpBytes) {
+    exif.rawXmpBytes = rawXmpBytes;
+  }
+
+  // If PNG, extract eXIf and iTXt metadata
+  if (ext.toUpperCase() === 'PNG') {
+    extractPngExifAndXmp(bytes, exif);
+  }
+
   let decoded8: { width: number; height: number; rgb8: Uint8Array };
   if (bestEmbeddedJpegBytes) {
     decoded8 = await decodeBlobToRgb8(
-      new Blob([bestEmbeddedJpegBytes as unknown as BlobPart], { type: 'image/jpeg' })
+      new Blob([bestEmbeddedJpegBytes as unknown as BlobPart], { type: 'image/jpeg' }),
+      maxSensorWidth,
+      maxSensorHeight
     );
   } else if (uncompressed8) {
     decoded8 = uncompressed8;
   } else {
     // Standard PNG / JPG / WebP or browser-supported image
-    decoded8 = await decodeBlobToRgb8(new Blob([buffer]));
+    decoded8 = await decodeBlobToRgb8(
+      new Blob([buffer]),
+      maxSensorWidth,
+      maxSensorHeight
+    );
   }
 
   const numPixels = decoded8.width * decoded8.height;

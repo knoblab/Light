@@ -21,7 +21,8 @@ import {
   buildZipArchiveBlob,
   encodeMaskU8ToBlob,
   encodeRgb8ToBlob,
-  injectIccProfileToJpegBlob,
+  injectMetadataAndIccToJpegBlob,
+  injectMetadataToPngBlob,
   writeLinearDngBuffer,
   writeTiff16Buffer,
 } from '../engine/binaryExporters';
@@ -235,16 +236,17 @@ async function renderExportBuffer(
     };
   } else if (fmt === 'png') {
     const pngBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/png');
+    const metaPngBlob = await injectMetadataToPngBlob(pngBlob, session.meta);
     return {
-      blob: pngBlob,
+      blob: metaPngBlob,
       ext: 'png',
       mimeType: 'image/png',
     };
   } else {
     const baseJpgBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/jpeg', 0.98);
-    const wideJpgBlob = await injectIccProfileToJpegBlob(baseJpgBlob, customIcc);
+    const metaJpgBlob = await injectMetadataAndIccToJpegBlob(baseJpgBlob, session.meta, customIcc);
     return {
-      blob: wideJpgBlob,
+      blob: metaJpgBlob,
       ext: 'jpg',
       mimeType: 'image/jpeg',
     };

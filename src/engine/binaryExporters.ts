@@ -175,58 +175,6 @@ function makeUndefinedTag(tag: number, data: Uint8Array): TiffTagEntry {
   };
 }
 
-/**
- * Injects an ICC Profile into a JPEG Blob using the standard APP2 marker (\xFF\xE2 "ICC_PROFILE\0").
- */
-export async function injectIccProfileToJpegBlob(jpegBlob: Blob, iccBytes: Uint8Array): Promise<Blob> {
-  const origBuf = await jpegBlob.arrayBuffer();
-  const origU8 = new Uint8Array(origBuf);
-
-  // JPEG starts with SOI (\xFF\xD8)
-  if (origU8.length < 4 || origU8[0] !== 0xff || origU8[1] !== 0xd8) {
-    return jpegBlob;
-  }
-
-  // Max payload per APP2 chunk is 65535 - 2 (length) - 14 ("ICC_PROFILE\0" + seq + total) = 65519
-  const MAX_CHUNK = 65519;
-  const totalChunks = Math.ceil(iccBytes.length / MAX_CHUNK);
-  const app2Segments: Uint8Array[] = [];
-
-  for (let seq = 1; seq <= totalChunks; seq++) {
-    const start = (seq - 1) * MAX_CHUNK;
-    const end = Math.min(iccBytes.length, seq * MAX_CHUNK);
-    const chunkData = iccBytes.subarray(start, end);
-    const segLen = 2 + 14 + chunkData.length;
-
-    const seg = new Uint8Array(2 + segLen);
-    seg[0] = 0xff;
-    seg[1] = 0xe2; // APP2
-    seg[2] = (segLen >> 8) & 0xff;
-    seg[3] = segLen & 0xff;
-
-    // "ICC_PROFILE\0"
-    const sig = [0x49, 0x43, 0x43, 0x5f, 0x50, 0x52, 0x4f, 0x46, 0x49, 0x4c, 0x45, 0x00];
-    for (let k = 0; k < 12; k++) seg[4 + k] = sig[k];
-    seg[16] = seq;
-    seg[17] = totalChunks;
-    seg.set(chunkData, 18);
-    app2Segments.push(seg);
-  }
-
-  // Combine: SOI (2 bytes) + APP2 segments + rest of JPEG (from offset 2)
-  const totalLength = 2 + app2Segments.reduce((sum, s) => sum + s.length, 0) + (origU8.length - 2);
-  const result = new Uint8Array(totalLength);
-  result.set(origU8.subarray(0, 2), 0);
-  let offset = 2;
-  for (const seg of app2Segments) {
-    result.set(seg, offset);
-    offset += seg.length;
-  }
-  result.set(origU8.subarray(2), offset);
-
-  return new Blob([result.buffer], { type: 'image/jpeg' });
-}
-
 function getTiffTypeByteSize(type: number): number {
   switch (type) {
     case 1:
@@ -252,7 +200,6 @@ function writeIfdBlock(
   entries: TiffTagEntry[],
   nextIfdOffset: number
 ): number {
-  // Sort entries strictly by ascending tag ID per TIFF/DNG specification
   const sorted = [...entries].sort((a, b) => a.tag - b.tag);
   const numEntries = sorted.length;
   view.setUint16(ifdOffset, numEntries, true);
@@ -284,12 +231,428 @@ function writeIfdBlock(
   return extraOffset;
 }
 
+// Precomputed CRC32 table for standard ZIP archive & PNG chunk generation
+const CRC32_TABLE = new Uint32Array(256);
+(function initCrc32() {
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    }
+    CRC32_TABLE[i] = c >>> 0;
+  }
+})();
+
+export function computeCrc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) {
+    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function parseExposureTimeToRational(exposureTimeStr: string | null | undefined): [number, number] | null {
+  if (!exposureTimeStr) return null;
+  const str = exposureTimeStr.replace('s', '').trim();
+  if (str.includes('/')) {
+    const parts = str.split('/');
+    const num = parseFloat(parts[0]);
+    const den = parseFloat(parts[1]);
+    if (num > 0 && den > 0) return [Math.round(num * 1000), Math.round(den * 1000)];
+  } else {
+    const sec = parseFloat(str);
+    if (sec > 0) return [Math.round(sec * 10000), 10000];
+  }
+  return null;
+}
+
+function parseFocalLengthToRational(focalStr: string | null | undefined): [number, number] | null {
+  if (!focalStr) return null;
+  const num = parseFloat(focalStr.replace('mm', '').trim());
+  if (num > 0) return [Math.round(num * 10), 10];
+  return null;
+}
+
+export function buildExifIfdEntries(meta: SessionMetadata): TiffTagEntry[] {
+  const exif = meta.exif || ({} as any);
+  const entries: TiffTagEntry[] = [
+    makeUndefinedTag(36864, new Uint8Array([0x30, 0x32, 0x33, 0x32])), // ExifVersion = 0232
+  ];
+
+  const expRat = parseExposureTimeToRational(exif.exposureTime);
+  if (expRat) {
+    entries.push(makeRationalTag(33434, [expRat])); // ExposureTime
+  }
+
+  if (exif.fNumber && exif.fNumber > 0) {
+    entries.push(makeRationalTag(33437, [[Math.round(exif.fNumber * 10), 10]])); // FNumber
+  }
+
+  if (exif.iso && exif.iso > 0) {
+    entries.push(makeShortTag(34855, [Math.round(exif.iso)])); // ISOSpeedRatings
+  }
+
+  if (exif.dateTime) {
+    entries.push(makeAsciiTag(36867, exif.dateTime)); // DateTimeOriginal
+    entries.push(makeAsciiTag(36868, exif.dateTime)); // CreateDate
+  }
+
+  if (typeof exif.shutterSpeedValue === 'number') {
+    entries.push(makeSRationalTag(37377, [[Math.round(exif.shutterSpeedValue * 100), 100]]));
+  }
+  if (typeof exif.apertureValue === 'number') {
+    entries.push(makeRationalTag(37378, [[Math.round(exif.apertureValue * 100), 100]]));
+  }
+  if (typeof exif.exposureBiasValue === 'number') {
+    entries.push(makeSRationalTag(37380, [[Math.round(exif.exposureBiasValue * 100), 100]]));
+  }
+  if (typeof exif.meteringMode === 'number') {
+    entries.push(makeShortTag(37383, [exif.meteringMode]));
+  }
+  if (typeof exif.flash === 'number') {
+    entries.push(makeShortTag(37385, [exif.flash]));
+  }
+
+  const focalRat = parseFocalLengthToRational(exif.focalLength);
+  if (focalRat) {
+    entries.push(makeRationalTag(37386, [focalRat])); // FocalLength
+  }
+
+  if (typeof exif.whiteBalanceMode === 'number') {
+    entries.push(makeShortTag(41987, [exif.whiteBalanceMode]));
+  }
+  if (typeof exif.focalLengthIn35mm === 'number' && exif.focalLengthIn35mm > 0) {
+    entries.push(makeShortTag(41989, [Math.round(exif.focalLengthIn35mm)]));
+  }
+
+  if (meta.fullWidth > 0 && meta.fullHeight > 0) {
+    entries.push(makeLongTag(40962, [meta.fullWidth]));  // PixelXDimension
+    entries.push(makeLongTag(40963, [meta.fullHeight])); // PixelYDimension
+  }
+
+  if (exif.lensModel) {
+    entries.push(makeAsciiTag(42036, exif.lensModel)); // LensModel
+  }
+  if (exif.lensMake) {
+    entries.push(makeAsciiTag(42035, exif.lensMake)); // LensMake
+  }
+
+  return entries;
+}
+
+function buildSyntheticExifTiffBuffer(meta: SessionMetadata): ArrayBuffer {
+  const buf = new ArrayBuffer(8192);
+  const view = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+
+  // Little-Endian TIFF: 'II', 42, IFD0 offset = 8
+  u8[0] = 0x49;
+  u8[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+
+  const makeStr = meta.exif?.make || 'Camera';
+  const modelStr = meta.exif?.model || 'Sensor';
+  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
+  const exifIfdOffset = 1024;
+
+  const ifd0Entries: TiffTagEntry[] = [
+    makeLongTag(256, [meta.fullWidth || 0]),
+    makeLongTag(257, [meta.fullHeight || 0]),
+    makeAsciiTag(271, makeStr),
+    makeAsciiTag(272, modelStr),
+    makeShortTag(274, [1]), // Orientation = 1 (Normal)
+    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro'),
+    makeAsciiTag(306, dateStr),
+    makeLongTag(34665, [exifIfdOffset]),
+  ];
+  if (meta.exif?.artist) ifd0Entries.push(makeAsciiTag(315, meta.exif.artist));
+  if (meta.exif?.copyright) ifd0Entries.push(makeAsciiTag(33432, meta.exif.copyright));
+
+  const exifIfdEntries = buildExifIfdEntries(meta);
+
+  const ifd0End = writeIfdBlock(view, 8, ifd0Entries, 0);
+  const exifIfdEnd = writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
+
+  const totalUsed = Math.max(ifd0End, exifIfdEnd);
+  return buf.slice(0, totalUsed + (totalUsed % 2));
+}
+
+/**
+ * Patches an existing TIFF-formatted EXIF buffer in-place so that:
+ *   - IFD0 Orientation (Tag 274) is set to 1 (since createImageBitmap already oriented the pixels)
+ *   - ImageWidth (256), ImageLength (257), PixelXDimension (40962), PixelYDimension (40963) match fullWidth/fullHeight
+ */
+function patchTiffExifDimensionsInPlace(tiffBytes: Uint8Array, fullW: number, fullH: number): void {
+  if (tiffBytes.length < 16 || fullW <= 0 || fullH <= 0) return;
+  const isLittle = tiffBytes[0] === 0x49 && tiffBytes[1] === 0x49;
+  const isBig = tiffBytes[0] === 0x4d && tiffBytes[1] === 0x4d;
+  if (!isLittle && !isBig) return;
+
+  const view = new DataView(tiffBytes.buffer, tiffBytes.byteOffset, tiffBytes.byteLength);
+  if (view.getUint16(2, isLittle) !== 42) return;
+
+  const writeScalarEntry = (entryPos: number, type: number, val: number) => {
+    if (type === 3) {
+      view.setUint16(entryPos + 8, val, isLittle);
+    } else if (type === 4) {
+      view.setUint32(entryPos + 8, val >>> 0, isLittle);
+    }
+  };
+
+  const patchIfdAt = (ifdOffset: number) => {
+    if (ifdOffset <= 0 || ifdOffset + 2 > view.byteLength) return 0;
+    const count = view.getUint16(ifdOffset, isLittle);
+    if (count <= 0 || count > 512 || ifdOffset + 2 + count * 12 > view.byteLength) return 0;
+    let exifSubOffset = 0;
+    for (let i = 0; i < count; i++) {
+      const entryPos = ifdOffset + 2 + i * 12;
+      const tag = view.getUint16(entryPos, isLittle);
+      const type = view.getUint16(entryPos + 2, isLittle);
+      if (tag === 274) {
+        // Orientation -> 1
+        writeScalarEntry(entryPos, type, 1);
+      } else if (tag === 256 || tag === 40962) {
+        writeScalarEntry(entryPos, type, fullW);
+      } else if (tag === 257 || tag === 40963) {
+        writeScalarEntry(entryPos, type, fullH);
+      } else if (tag === 34665) {
+        exifSubOffset = view.getUint32(entryPos + 8, isLittle);
+      }
+    }
+    return exifSubOffset;
+  };
+
+  const firstIfd = view.getUint32(4, isLittle);
+  const subIfd = patchIfdAt(firstIfd);
+  if (subIfd > 0) {
+    patchIfdAt(subIfd);
+  }
+}
+
+function buildApp1ExifSegment(meta: SessionMetadata): Uint8Array {
+  if (meta.exif?.rawApp1ExifBytes && meta.exif.rawApp1ExifBytes.length >= 14) {
+    const cloned = meta.exif.rawApp1ExifBytes.slice();
+    if (cloned[0] === 0xff && cloned[1] === 0xe1 && cloned.length > 16) {
+      patchTiffExifDimensionsInPlace(cloned.subarray(10), meta.fullWidth, meta.fullHeight);
+    }
+    return cloned;
+  }
+  const tiffBuf = buildSyntheticExifTiffBuffer(meta);
+  const tiffU8 = new Uint8Array(tiffBuf);
+  const segLen = 2 + 6 + tiffU8.length;
+  const seg = new Uint8Array(2 + segLen);
+  seg[0] = 0xff;
+  seg[1] = 0xe1;
+  seg[2] = (segLen >> 8) & 0xff;
+  seg[3] = segLen & 0xff;
+  seg[4] = 0x45; // 'E'
+  seg[5] = 0x78; // 'x'
+  seg[6] = 0x69; // 'i'
+  seg[7] = 0x66; // 'f'
+  seg[8] = 0x00;
+  seg[9] = 0x00;
+  seg.set(tiffU8, 10);
+  return seg;
+}
+
+function buildPngExifChunk(meta: SessionMetadata): Uint8Array {
+  let tiffBytes: Uint8Array;
+  if (meta.exif?.rawApp1ExifBytes && meta.exif.rawApp1ExifBytes.length >= 14) {
+    if (meta.exif.rawApp1ExifBytes[0] === 0xff && meta.exif.rawApp1ExifBytes[1] === 0xe1) {
+      tiffBytes = meta.exif.rawApp1ExifBytes.subarray(10).slice();
+    } else {
+      tiffBytes = meta.exif.rawApp1ExifBytes.slice();
+    }
+    patchTiffExifDimensionsInPlace(tiffBytes, meta.fullWidth, meta.fullHeight);
+  } else {
+    tiffBytes = new Uint8Array(buildSyntheticExifTiffBuffer(meta));
+  }
+
+  const chunkLen = tiffBytes.length;
+  const totalChunkSize = 4 + 4 + chunkLen + 4;
+  const chunk = new Uint8Array(totalChunkSize);
+  const view = new DataView(chunk.buffer);
+
+  view.setUint32(0, chunkLen, false);
+  chunk[4] = 0x65; // 'e'
+  chunk[5] = 0x58; // 'X'
+  chunk[6] = 0x49; // 'I'
+  chunk[7] = 0x66; // 'f'
+  chunk.set(tiffBytes, 8);
+
+  const crc = computeCrc32(chunk.subarray(4, 8 + chunkLen));
+  view.setUint32(8 + chunkLen, crc, false);
+  return chunk;
+}
+
+function buildPngXmpChunk(rawXmpBytes: Uint8Array): Uint8Array {
+  const keyword = [0x58, 0x4d, 0x4c, 0x3a, 0x63, 0x6f, 0x6d, 0x2e, 0x61, 0x64, 0x6f, 0x62, 0x65, 0x2e, 0x78, 0x6d, 0x70, 0x00];
+  const prefix = new Uint8Array([...keyword, 0x00, 0x00, 0x00, 0x00]);
+  const chunkData = new Uint8Array(prefix.length + rawXmpBytes.length);
+  chunkData.set(prefix, 0);
+  chunkData.set(rawXmpBytes, prefix.length);
+
+  const chunkLen = chunkData.length;
+  const totalChunkSize = 4 + 4 + chunkLen + 4;
+  const chunk = new Uint8Array(totalChunkSize);
+  const view = new DataView(chunk.buffer);
+
+  view.setUint32(0, chunkLen, false);
+  chunk[4] = 0x69; // 'i'
+  chunk[5] = 0x54; // 'T'
+  chunk[6] = 0x58; // 'X'
+  chunk[7] = 0x74; // 't'
+  chunk.set(chunkData, 8);
+
+  const crc = computeCrc32(chunk.subarray(4, 8 + chunkLen));
+  view.setUint32(8 + chunkLen, crc, false);
+  return chunk;
+}
+
+/**
+ * Injects EXIF and XMP metadata into a PNG Blob via standard eXIf and iTXt chunks.
+ */
+export async function injectMetadataToPngBlob(
+  pngBlob: Blob,
+  meta: SessionMetadata
+): Promise<Blob> {
+  const origBuf = await pngBlob.arrayBuffer();
+  const origU8 = new Uint8Array(origBuf);
+
+  if (
+    origU8.length < 33 ||
+    origU8[0] !== 0x89 ||
+    origU8[1] !== 0x50 ||
+    origU8[2] !== 0x4e ||
+    origU8[3] !== 0x47
+  ) {
+    return pngBlob;
+  }
+
+  const ihdrEnd = 33;
+  const exifChunk = buildPngExifChunk(meta);
+  const xmpChunk = meta.exif?.rawXmpBytes ? buildPngXmpChunk(meta.exif.rawXmpBytes) : null;
+
+  const totalLength = origU8.length + exifChunk.length + (xmpChunk ? xmpChunk.length : 0);
+  const result = new Uint8Array(totalLength);
+
+  result.set(origU8.subarray(0, ihdrEnd), 0);
+  let curOffset = ihdrEnd;
+
+  result.set(exifChunk, curOffset);
+  curOffset += exifChunk.length;
+
+  if (xmpChunk) {
+    result.set(xmpChunk, curOffset);
+    curOffset += xmpChunk.length;
+  }
+
+  result.set(origU8.subarray(ihdrEnd), curOffset);
+  return new Blob([result.buffer], { type: 'image/png' });
+}
+
+/**
+ * Injects complete EXIF metadata, XMP, and ICC Profile into a JPEG Blob.
+ */
+export async function injectMetadataAndIccToJpegBlob(
+  jpegBlob: Blob,
+  meta: SessionMetadata,
+  iccBytes?: Uint8Array
+): Promise<Blob> {
+  const origBuf = await jpegBlob.arrayBuffer();
+  const origU8 = new Uint8Array(origBuf);
+
+  if (origU8.length < 4 || origU8[0] !== 0xff || origU8[1] !== 0xd8) {
+    return jpegBlob;
+  }
+
+  // 1. Build APP1 EXIF segment
+  const app1ExifSeg = buildApp1ExifSegment(meta);
+
+  // 2. Build APP1 XMP segment if present
+  let app1XmpSeg: Uint8Array | null = null;
+  if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
+    const xmpData = meta.exif.rawXmpBytes;
+    if (xmpData[0] === 0xff && xmpData[1] === 0xe1) {
+      app1XmpSeg = xmpData;
+    } else {
+      const segLen = 2 + xmpData.length;
+      app1XmpSeg = new Uint8Array(2 + segLen);
+      app1XmpSeg[0] = 0xff;
+      app1XmpSeg[1] = 0xe1;
+      app1XmpSeg[2] = (segLen >> 8) & 0xff;
+      app1XmpSeg[3] = segLen & 0xff;
+      app1XmpSeg.set(xmpData, 4);
+    }
+  }
+
+  // 3. Build APP2 ICC profile segments
+  const app2Segments: Uint8Array[] = [];
+  if (iccBytes && iccBytes.length > 0) {
+    const MAX_CHUNK = 65519;
+    const totalChunks = Math.ceil(iccBytes.length / MAX_CHUNK);
+    for (let seq = 1; seq <= totalChunks; seq++) {
+      const start = (seq - 1) * MAX_CHUNK;
+      const end = Math.min(iccBytes.length, seq * MAX_CHUNK);
+      const chunkData = iccBytes.subarray(start, end);
+      const segLen = 2 + 14 + chunkData.length;
+
+      const seg = new Uint8Array(2 + segLen);
+      seg[0] = 0xff;
+      seg[1] = 0xe2;
+      seg[2] = (segLen >> 8) & 0xff;
+      seg[3] = segLen & 0xff;
+      const sig = [0x49, 0x43, 0x43, 0x5f, 0x50, 0x52, 0x4f, 0x46, 0x49, 0x4c, 0x45, 0x00];
+      for (let k = 0; k < 12; k++) seg[4 + k] = sig[k];
+      seg[16] = seq;
+      seg[17] = totalChunks;
+      seg.set(chunkData, 18);
+      app2Segments.push(seg);
+    }
+  }
+
+  // Scan origU8 for existing APP0 / APP1 / APP2 to avoid duplicate headers
+  let restOffset = 2;
+  while (restOffset + 4 < origU8.length && origU8[restOffset] === 0xff) {
+    const marker = origU8[restOffset + 1];
+    if (marker === 0xe0 || marker === 0xe1 || marker === 0xe2) {
+      const segLen = (origU8[restOffset + 2] << 8) | origU8[restOffset + 3];
+      restOffset += 2 + segLen;
+    } else {
+      break;
+    }
+  }
+
+  const extraSegments: Uint8Array[] = [app1ExifSeg];
+  if (app1XmpSeg) extraSegments.push(app1XmpSeg);
+  for (const seg of app2Segments) extraSegments.push(seg);
+
+  const totalLength = 2 + extraSegments.reduce((sum, s) => sum + s.length, 0) + (origU8.length - restOffset);
+  const result = new Uint8Array(totalLength);
+  result[0] = 0xff;
+  result[1] = 0xd8; // SOI
+
+  let offset = 2;
+  for (const seg of extraSegments) {
+    result.set(seg, offset);
+    offset += seg.length;
+  }
+  result.set(origU8.subarray(restOffset), offset);
+
+  return new Blob([result.buffer], { type: 'image/jpeg' });
+}
+
+export async function injectIccProfileToJpegBlob(jpegBlob: Blob, iccBytes: Uint8Array): Promise<Blob> {
+  return await injectMetadataAndIccToJpegBlob(jpegBlob, {} as any, iccBytes);
+}
+
 /**
  * Builds a standard Dual-IFD 16-bit Linear DNG 1.4 binary ArrayBuffer:
- *   - IFD0: High-resolution 8-bit RGB preview with 100% original camera color & contrast
- *     paired with embedded Tag 34675 (ICCProfile) for wide gamut color spaces (Adobe RGB, P3, BT.2020)
+ *   - IFD0: High-resolution 8-bit RGB preview with 100% original camera color & contrast,
+ *     paired with embedded Tag 34675 (ICCProfile), ExifIFD pointer (Tag 34665), and XMP (Tag 700)
+ *   - ExifIFD: Complete camera make, model, lens, exposure time, aperture, ISO, and shooting tags
  *   - SubIFD0: Full-resolution 16-bit LinearRaw RGB with D65 ColorMatrix1 + ProfileToneCurve
- *     (for Adobe Lightroom, Camera Raw, Darktable, and professional 16-bit workflows)
  */
 export function writeLinearDngBuffer(
   healedRgb8: Uint8Array,
@@ -300,20 +663,15 @@ export function writeLinearDngBuffer(
   targetColorSpace: ColorSpaceId = 'auto',
   customIccProfile?: Uint8Array
 ): ArrayBuffer {
-  const maxPrevDim = 2560;
-  let prevW = fullW;
-  let prevH = fullH;
-  let prevRgb8 = healedRgb8;
-  if (Math.max(fullW, fullH) > maxPrevDim) {
-    const scale = maxPrevDim / Math.max(fullW, fullH);
-    prevW = Math.max(1, Math.round(fullW * scale));
-    prevH = Math.max(1, Math.round(fullH * scale));
-    prevRgb8 = resizeRgb8Area(healedRgb8, fullW, fullH, prevW, prevH);
-  }
+  // Always keep IFD0 at 100% full original resolution (never downscale)
+  const prevW = fullW;
+  const prevH = fullH;
+  const prevRgb8 = healedRgb8;
 
   const makeStr = meta.exif?.make || 'Panasonic';
   const modelStr = meta.exif?.model || 'Lumix Camera Sensor';
   const uniqueModel = `${makeStr} ${modelStr}`.trim();
+  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
 
   const effectiveSpace: Exclude<ColorSpaceId, 'auto'> =
     targetColorSpace === 'auto'
@@ -329,7 +687,6 @@ export function writeLinearDngBuffer(
   const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
   const profileName = COLOR_SPACE_DEFS[effectiveSpace]?.name || 'Adobe RGB (1998)';
 
-  // Camera S-Curve ProfileToneCurve (Tag 50940 / 0xC6FC) so Lightroom/ACR renders deep blacks and rich contrast
   const profileToneCurveFloats = [
     0.0, 0.0,
     0.06, 0.038,
@@ -343,8 +700,8 @@ export function writeLinearDngBuffer(
   const prevByteCount = prevW * prevH * 3;
   const raw16ByteCount = fullW * fullH * 3 * 2;
 
-  // Reserve 16384 bytes for headers + IFD0 + SubIFD0 + ICC profile metadata before pixel strips
-  const headerReserve = 16384;
+  // Reserve 32768 bytes for headers + IFD0 + ExifIFD + SubIFD0 + ICC profile + XMP
+  const headerReserve = 32768;
   const prevStripOffset = headerReserve;
   const raw16StripOffset = prevStripOffset + prevByteCount + (prevByteCount % 2);
   const totalBufferSize = raw16StripOffset + raw16ByteCount;
@@ -359,8 +716,8 @@ export function writeLinearDngBuffer(
   view.setUint16(2, 42, true);
   view.setUint32(4, 8, true);
 
-  // Placeholder SubIFD0 offset (will be computed after sizing IFD0)
-  const subIfdOffset = 4096;
+  const exifIfdOffset = 2048;
+  const subIfdOffset = 6144;
 
   const ifd0Entries: TiffTagEntry[] = [
     makeLongTag(254, [1]), // NewSubfileType = 1 (Preview / Reduced-res)
@@ -380,8 +737,10 @@ export function writeLinearDngBuffer(
     makeRationalTag(283, [[72, 1]]),
     makeShortTag(284, [1]), // PlanarConfig = Contig
     makeShortTag(296, [2]), // ResolutionUnit = Inch
-    makeAsciiTag(305, 'SensorClean Pro Wide-Gamut DNG Engine'),
+    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro Wide-Gamut DNG Engine'),
+    makeAsciiTag(306, dateStr),
     makeLongTag(330, [subIfdOffset]), // SubIFDs pointer -> SubIFD0
+    makeLongTag(34665, [exifIfdOffset]), // ExifIFD pointer
     makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
     makeByteTag(50706, [1, 4, 0, 0]), // DNGVersion 1.4.0.0
     makeByteTag(50707, [1, 1, 0, 0]), // DNGBackwardVersion 1.1.0.0
@@ -392,6 +751,14 @@ export function writeLinearDngBuffer(
     makeAsciiTag(50936, profileName), // ProfileName
     makeFloatTag(50940, profileToneCurveFloats), // ProfileToneCurve
   ];
+
+  if (meta.exif?.artist) ifd0Entries.push(makeAsciiTag(315, meta.exif.artist));
+  if (meta.exif?.copyright) ifd0Entries.push(makeAsciiTag(33432, meta.exif.copyright));
+  if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
+    ifd0Entries.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
+  }
+
+  const exifIfdEntries = buildExifIfdEntries(meta);
 
   const subIfdEntries: TiffTagEntry[] = [
     makeLongTag(254, [0]), // NewSubfileType = 0 (Full-res Main Image)
@@ -413,12 +780,13 @@ export function writeLinearDngBuffer(
   ];
 
   writeIfdBlock(view, 8, ifd0Entries, 0);
+  writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
   writeIfdBlock(view, subIfdOffset, subIfdEntries, 0);
 
-  // Write IFD0 8-bit preview pixels (100% original camera colors & contrast)
+  // Write IFD0 8-bit preview pixels
   u8.set(prevRgb8, prevStripOffset);
 
-  // Write SubIFD0 16-bit Linear RGB pixels (Little-Endian uint16)
+  // Write SubIFD0 16-bit Linear RGB pixels
   const dst16 = new Uint16Array(buffer, raw16StripOffset, healedLinear16.length);
   dst16.set(healedLinear16);
 
@@ -427,7 +795,7 @@ export function writeLinearDngBuffer(
 
 /**
  * Builds a standard 16-bit uncompressed RGB TIFF binary ArrayBuffer (.tiff)
- * with Tag 34675 (ICCProfile) embedded for wide-gamut reproduction.
+ * with complete ExifIFD (Tag 34665), ICCProfile (Tag 34675), and XMP (Tag 700) embedded.
  */
 export function writeTiff16Buffer(
   healedRgb8: Uint8Array,
@@ -448,7 +816,8 @@ export function writeTiff16Buffer(
 
   const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
 
-  const headerReserve = 8192;
+  const exifIfdOffset = 2048;
+  const headerReserve = 32768;
   const stripOffset = headerReserve;
   const totalBufferSize = stripOffset + raw16ByteCount;
 
@@ -463,6 +832,7 @@ export function writeTiff16Buffer(
 
   const makeStr = meta.exif?.make || 'Camera';
   const modelStr = meta.exif?.model || 'Sensor';
+  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
 
   const entries: TiffTagEntry[] = [
     makeLongTag(254, [0]),
@@ -473,6 +843,8 @@ export function writeTiff16Buffer(
     makeShortTag(262, [2]), // Photometric = 2 (RGB)
     makeAsciiTag(271, makeStr),
     makeAsciiTag(272, modelStr),
+    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro Wide-Gamut 16-bit TIFF Engine'),
+    makeAsciiTag(306, dateStr),
     makeLongTag(273, [stripOffset]),
     makeShortTag(274, [1]),
     makeShortTag(277, [3]),
@@ -482,13 +854,22 @@ export function writeTiff16Buffer(
     makeRationalTag(283, [[72, 1]]),
     makeShortTag(284, [1]),
     makeShortTag(296, [2]),
-    makeAsciiTag(305, 'SensorClean Pro Wide-Gamut 16-bit TIFF Engine'),
+    makeLongTag(34665, [exifIfdOffset]), // ExifIFD pointer
     makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
   ];
 
-  writeIfdBlock(view, 8, entries, 0);
+  if (meta.exif?.artist) entries.push(makeAsciiTag(315, meta.exif.artist));
+  if (meta.exif?.copyright) entries.push(makeAsciiTag(33432, meta.exif.copyright));
+  if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
+    entries.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
+  }
 
-  // Expand camera-accurate healedRgb8 to 16-bit (0..65535) with low-order bit precision from healedLinear16
+  const exifIfdEntries = buildExifIfdEntries(meta);
+
+  writeIfdBlock(view, 8, entries, 0);
+  writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
+
+  // Expand camera-accurate healedRgb8 to 16-bit with low-order bit precision from healedLinear16
   const dst16 = new Uint16Array(buffer, stripOffset, numSamples);
   for (let i = 0; i < numSamples; i++) {
     const v8 = healedRgb8[i];
@@ -497,26 +878,6 @@ export function writeTiff16Buffer(
   }
 
   return buffer;
-}
-
-// Precomputed CRC32 table for standard ZIP archive generation
-const CRC32_TABLE = new Uint32Array(256);
-(function initCrc32() {
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
-    CRC32_TABLE[i] = c >>> 0;
-  }
-})();
-
-function computeCrc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
-  for (let i = 0; i < bytes.length; i++) {
-    crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 /**
