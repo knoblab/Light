@@ -1,0 +1,6 @@
+{
+  "summary": "Updated implementation plan for Cloudflare Pages migration AND exact camera color/contrast matching (CDF Tone-Curve LUT calibration from embedded RAW JPEG + 1:1 outside-mask pixel preservation).",
+  "updatedAt": "2026-11-03T12:08:40.707939905Z",
+  "requestFeedback": true,
+  "userFacing": true
+}

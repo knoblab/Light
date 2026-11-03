@@ -1,0 +1,6 @@
+{
+  "name": "SensorClean Pro — 16-bit RW2 & RAW Sensor Dust Remover",
+  "description": "Python OpenCV, rawpy, and tifffile powered 16-bit linear RAW (RW2/DNG) camera sensor dust automatic detection (DoG & Black-Hat contour circularity) and Telea inpainting studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
