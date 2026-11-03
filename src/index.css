@@ -3,15 +3,13 @@
 
 @layer base {
   :root {
-    --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'IBM Plex Sans', 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   }
 
   body {
     font-family: var(--font-sans);
-    background-color: #121212;
-    color: #E5E5E5;
+    background-color: #2B2B2E;
+    color: #E7E6E1;
     letter-spacing: -0.005em;
     overflow: hidden;
     user-select: none;
@@ -19,12 +17,12 @@
   }
 
   .font-mono, code, pre, .tabular-nums {
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     font-variant-numeric: tabular-nums;
   }
 }
 
-/* Adobe Lightroom CC Style Precision Sliders */
+/* Precision Sliders */
 input[type='range'].lr-slider {
   -webkit-appearance: none;
   appearance: none;
@@ -41,7 +39,7 @@ input[type='range'].lr-slider:focus {
 input[type='range'].lr-slider::-webkit-slider-runnable-track {
   height: 2px;
   border-radius: 1px;
-  background: #3A3A3A;
+  background: #535356;
 }
 
 input[type='range'].lr-slider::-webkit-slider-thumb {
@@ -50,15 +48,15 @@ input[type='range'].lr-slider::-webkit-slider-thumb {
   width: 12px;
   height: 12px;
   border-radius: 9999px;
-  background: #D4D4D4;
-  border: 1px solid #121212;
+  background: #C2C1BB;
+  border: 1px solid #2B2B2E;
   margin-top: -5px;
   transition: transform 120ms ease, background-color 120ms ease;
 }
 
 input[type='range'].lr-slider:hover::-webkit-slider-thumb,
 input[type='range'].lr-slider:active::-webkit-slider-thumb {
-  background: #0A84FF;
+  background: #556042;
   transform: scale(1.15);
 }
 

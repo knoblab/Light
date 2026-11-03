@@ -5,7 +5,6 @@ import {
   Download,
   RefreshCw,
   AlertCircle,
-  Film,
   Eraser,
   MousePointer,
   Paintbrush,
@@ -21,9 +20,7 @@ import {
   PanelRightOpen,
   X,
   Plus,
-  Palette,
-  Camera,
-  ShieldCheck,
+  Search,
 } from 'lucide-react';
 import {
   ColorSpaceId,
@@ -58,7 +55,7 @@ interface HistorySnapshot {
   showDustOverlay: boolean;
 }
 
-// Reusable Lightroom CC Compact Slider Component
+// Reusable Compact Slider Component
 const LrSlider: React.FC<{
   label: string;
   value: number;
@@ -70,8 +67,8 @@ const LrSlider: React.FC<{
 }> = ({ label, value, displayValue, min, max, step = 1, onChange }) => (
   <div className="py-1.5">
     <div className="flex items-center justify-between text-[11px] mb-1">
-      <span className="text-[#B8B8B8] font-medium">{label}</span>
-      <span className="font-mono text-[#E5E5E5] tabular-nums">
+      <span className="text-[#C2C1BB] font-medium">{label}</span>
+      <span className="text-[#E7E6E1] tabular-nums">
         {displayValue !== undefined ? displayValue : value}
       </span>
     </div>
@@ -275,10 +272,11 @@ export function App() {
     return () => window.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Step 1: Upload file and display original image without automatically triggering dust detection
   const handleUploadFile = async (file: File) => {
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel(`${file.name} 로컬 현상 및 먼지 분석 중...`);
+    setProcessingLabel(`${file.name} 불러오는 중...`);
 
     try {
       const data = await localSensorEngine.uploadAndDetect(file, params);
@@ -286,7 +284,8 @@ export function App() {
       setSessionId(data.sessionId);
       setMeta(data.meta);
       setUrls(data.urls);
-      setSpots(data.detection.spots || []);
+      // Initialize with no active spots so the user can analyze or manually edit
+      setSpots([]);
       setSelectedSpotId(null);
       setManualStrokes([]);
       setInpaintResult(null);
@@ -303,6 +302,7 @@ export function App() {
     }
   };
 
+  // Step 2: Dust Analysis action button
   const handleRedetect = async (overrideParams?: Partial<DetectionParams>) => {
     if (!sessionId) return;
     pushHistorySnapshot();
@@ -310,7 +310,7 @@ export function App() {
     setParams(nextParams);
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel('먼지 재탐지 중...');
+    setProcessingLabel('먼지 분석 중...');
 
     try {
       if (studioMode === 'sequence' && sequenceItems.length > 0) {
@@ -396,7 +396,7 @@ export function App() {
     if (files.length === 0) return;
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel(`연속 사진 ${files.length}장 로컬 분석 중...`);
+    setProcessingLabel(`연속 사진 ${files.length}장 불러오는 중...`);
 
     try {
       const data = await localSensorEngine.multiUpload(files, params);
@@ -406,7 +406,7 @@ export function App() {
         meta: s.meta,
         detection: s.detection,
         urls: s.urls,
-        spots: s.detection?.spots || [],
+        spots: [],
         manualStrokes: [],
         inpaintResult: null,
       }));
@@ -420,7 +420,7 @@ export function App() {
         setSessionId(first.sessionId);
         setMeta(first.meta);
         setUrls(first.urls);
-        setSpots(first.spots);
+        setSpots([]);
         setSelectedSpotId(null);
         setManualStrokes([]);
         setInpaintResult(null);
@@ -466,7 +466,7 @@ export function App() {
     if (sequenceItems.length === 0) return;
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel(`연속 사진 ${sequenceItems.length}장 일괄 복원 중...`);
+    setProcessingLabel(`연속 사진 ${sequenceItems.length}장 일괄 먼지 제거 적용 중...`);
 
     try {
       const currentItems = sequenceItems.map((item, idx) =>
@@ -505,7 +505,7 @@ export function App() {
         setComparisonMode('healed-only');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || '일괄 복원 오류');
+      setErrorMessage(err.message || '일괄 적용 오류');
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
@@ -582,12 +582,13 @@ export function App() {
     }
   };
 
+  // Step 3: Apply inpainting
   const handleApplyInpainting = async () => {
     if (!sessionId) return;
     pushHistorySnapshot();
     setErrorMessage(null);
     setIsProcessing(true);
-    setProcessingLabel('먼지 복원 적용 중...');
+    setProcessingLabel('스팟 제거 적용 중...');
 
     try {
       const data = await localSensorEngine.inpaint(
@@ -611,13 +612,14 @@ export function App() {
       setShowDustOverlay(false);
       setComparisonMode('healed-only');
     } catch (err: any) {
-      setErrorMessage(err.message || '복원 중 오류 발생');
+      setErrorMessage(err.message || '복원 적용 중 오류 발생');
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
     }
   };
 
+  // Step 4: Export (if not applied, export original; if applied, export cleaned)
   const handleExportFormat = async (format: 'dng' | 'tiff16' | 'png' | 'jpg') => {
     if (!sessionId) return;
     setExportingFormat(format);
@@ -635,7 +637,7 @@ export function App() {
     const labelPrefix = formatNames[format] || format.toUpperCase();
 
     try {
-      setProcessingLabel(`${labelPrefix} 렌더링 중...`);
+      setProcessingLabel(`${labelPrefix} 내보내는 중...`);
       const res = await localSensorEngine.exportSingle(
         sessionId,
         format,
@@ -660,9 +662,6 @@ export function App() {
             : null
         );
       }
-      setShowDustOverlay(false);
-      setComparisonMode('healed-only');
-
       localSensorEngine.triggerBrowserDownload(res.fileBlob, res.downloadName);
     } catch (err: any) {
       setErrorMessage(err.message || '내보내기 실패');
@@ -676,7 +675,7 @@ export function App() {
   const enabledSpotsCount = spots.filter((s) => s.enabled).length;
 
   return (
-    <div className="h-[100dvh] w-screen flex flex-col bg-[#121212] text-[#E5E5E5] overflow-hidden select-none">
+    <div className="h-[100dvh] w-screen flex flex-col bg-[#2B2B2E] text-[#E7E6E1] overflow-hidden select-none">
       {/* Hidden File Inputs */}
       <input
         ref={topFileInputRef}
@@ -703,8 +702,8 @@ export function App() {
         className="hidden"
       />
 
-      {/* Top Header Bar — Lightroom CC Slim Header */}
-      <header className="h-11 px-3 bg-[#1E1E1E] border-b border-[#323232] flex items-center justify-between gap-4 shrink-0 z-30">
+      {/* Top Header Bar */}
+      <header className="h-11 px-3 bg-[#3A3A3D] border-b border-[#535356] flex items-center justify-between gap-4 shrink-0 z-30">
         {/* Left: Brand + Mode Switch + Import */}
         <div className="flex items-center gap-2.5 shrink-0">
           <div className="flex items-center gap-1.5">
@@ -714,14 +713,14 @@ export function App() {
             </span>
           </div>
 
-          <div className="flex items-center p-0.5 bg-[#141414] border border-[#323232] rounded">
+          <div className="flex items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded">
             <button
               type="button"
               onClick={() => setStudioMode('single')}
               className={`px-2 py-0.5 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
                 studioMode === 'single'
-                  ? 'bg-[#2E2E2E] text-white'
-                  : 'text-[#8E8E8E] hover:text-[#D4D4D4]'
+                  ? 'bg-[#556042] text-white'
+                  : 'text-[#888783] hover:text-[#C2C1BB]'
               }`}
             >
               단일
@@ -736,13 +735,13 @@ export function App() {
               }}
               className={`flex items-center gap-1 px-2 py-0.5 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
                 studioMode === 'sequence'
-                  ? 'bg-[#0A84FF] text-white'
-                  : 'text-[#8E8E8E] hover:text-[#D4D4D4]'
+                  ? 'bg-[#556042] text-white'
+                  : 'text-[#888783] hover:text-[#C2C1BB]'
               }`}
             >
               <span>연속</span>
               {sequenceItems.length > 0 && (
-                <span className="font-mono text-[10px] opacity-90">
+                <span className="text-[10px] opacity-90">
                   {sequenceItems.length}
                 </span>
               )}
@@ -757,11 +756,24 @@ export function App() {
                 : topFileInputRef.current?.click()
             }
             disabled={isProcessing}
-            className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#282828] hover:bg-[#333333] text-[#E5E5E5] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap"
+            className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] text-[#E7E6E1] text-[11px] font-medium border border-[#535356] transition-colors cursor-pointer whitespace-nowrap"
           >
-            <Upload className="w-3 h-3" />
-            <span className="hidden sm:inline">불러오기</span>
+            <Upload className="w-3 h-3 text-[#C2C1BB]" />
+            <span className="hidden sm:inline">1. 불러오기</span>
           </button>
+
+          {sessionId && (
+            <button
+              type="button"
+              onClick={() => handleRedetect()}
+              disabled={isProcessing}
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap"
+              title="먼지 분석 실행"
+            >
+              <Search className="w-3 h-3" />
+              <span>2. 먼지 분석</span>
+            </button>
+          )}
 
           {sessionId && (
             <div className="flex items-center gap-0.5 ml-0.5">
@@ -770,7 +782,7 @@ export function App() {
                 onClick={handleUndo}
                 disabled={undoStack.length === 0 || isProcessing}
                 title="되돌리기 (Ctrl+Z)"
-                className="p-1.5 rounded text-[#B8B8B8] hover:text-white hover:bg-[#282828] disabled:opacity-30 transition-colors cursor-pointer"
+                className="p-1.5 rounded text-[#C2C1BB] hover:text-white hover:bg-[#535356] disabled:opacity-30 transition-colors cursor-pointer"
               >
                 <Undo2 className="w-3.5 h-3.5" />
               </button>
@@ -779,7 +791,7 @@ export function App() {
                 onClick={handleRedo}
                 disabled={redoStack.length === 0 || isProcessing}
                 title="다시 실행 (Ctrl+Shift+Z)"
-                className="p-1.5 rounded text-[#B8B8B8] hover:text-white hover:bg-[#282828] disabled:opacity-30 transition-colors cursor-pointer"
+                className="p-1.5 rounded text-[#C2C1BB] hover:text-white hover:bg-[#535356] disabled:opacity-30 transition-colors cursor-pointer"
               >
                 <Redo2 className="w-3.5 h-3.5" />
               </button>
@@ -787,20 +799,17 @@ export function App() {
           )}
         </div>
 
-        {/* Center: Unboxed Metadata Readout */}
+        {/* Center: Metadata Readout */}
         {meta && (
-          <div className="hidden lg:flex items-center gap-2 text-[11px] text-[#9E9E9E] font-mono truncate">
-            <span className="text-[#E5E5E5] font-medium truncate max-w-[170px]">
+          <div className="hidden lg:flex items-center gap-2 text-[11px] text-[#C2C1BB] truncate">
+            <span className="text-[#E7E6E1] font-medium truncate max-w-[170px]">
               {meta.originalFileName}
             </span>
             {(meta.exif.make || meta.exif.model) && (
               <>
                 <span>·</span>
-                <span className="inline-flex items-center gap-1 text-[#E5E5E5] font-sans">
-                  <Camera className="w-3 h-3 text-[#5AC8FA]" />
-                  <span className="truncate max-w-[160px]">
-                    {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ')}
-                  </span>
+                <span className="truncate max-w-[160px] text-[#E7E6E1]">
+                  {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ')}
                 </span>
               </>
             )}
@@ -834,10 +843,9 @@ export function App() {
             )}
             <span>·</span>
             <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-[#242424] text-[#5AC8FA] border border-[#383838]"
-              title={`원본 감지 색공간: ${meta.detectedColorSpace || 'sRGB'} ${meta.hasEmbeddedIcc ? '(ICC 프로파일 내장)' : ''}`}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-[#2B2B2E] text-[#E7E6E1] border border-[#535356]"
+              title={`원본 감지 색공간: ${meta.detectedColorSpace || 'sRGB'}`}
             >
-              <Palette className="w-2.5 h-2.5" />
               <span>
                 {meta.detectedColorSpace === 'adobe-rgb'
                   ? 'Adobe RGB'
@@ -851,12 +859,9 @@ export function App() {
                   ? 'sRGB'
                   : '광색역 감지'}
               </span>
-              {meta.hasEmbeddedIcc && (
-                <span className="text-[9px] text-[#A1A1AA] uppercase">ICC</span>
-              )}
             </span>
             <span>·</span>
-            <span className="text-[#D4D4D4]">
+            <span className="text-[#E7E6E1]">
               스팟 {enabledSpotsCount}/{spots.length}
             </span>
           </div>
@@ -864,23 +869,15 @@ export function App() {
 
         {/* Mobile Center Filename */}
         {meta && (
-          <div className="flex lg:hidden items-center gap-1.5 text-[11px] font-mono text-[#B8B8B8] truncate">
-            <span className="truncate max-w-[100px] text-[#E5E5E5]">
+          <div className="flex lg:hidden items-center gap-1.5 text-[11px] text-[#C2C1BB] truncate">
+            <span className="truncate max-w-[100px] text-[#E7E6E1]">
               {meta.originalFileName}
             </span>
             {meta.exif.model && (
               <>
                 <span>·</span>
-                <span className="truncate max-w-[80px] text-[#5AC8FA]">
+                <span className="truncate max-w-[80px] text-[#E7E6E1]">
                   {meta.exif.model}
-                </span>
-              </>
-            )}
-            {meta.detectedColorSpace && meta.detectedColorSpace !== 'srgb' && (
-              <>
-                <span>·</span>
-                <span className="text-[10px] text-[#5AC8FA]">
-                  {meta.detectedColorSpace === 'adobe-rgb' ? 'AdobeRGB' : 'P3'}
                 </span>
               </>
             )}
@@ -896,9 +893,9 @@ export function App() {
               type="button"
               onClick={handleApplyBatchInpainting}
               disabled={!sessionId || isProcessing}
-              className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded bg-[#282828] hover:bg-[#333333] text-[#E5E5E5] text-[11px] font-medium cursor-pointer whitespace-nowrap disabled:opacity-40"
+              className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-[11px] font-medium cursor-pointer whitespace-nowrap disabled:opacity-40"
             >
-              <Check className="w-3 h-3 text-[#0A84FF]" />
+              <Check className="w-3 h-3 text-[#556042]" />
               <span>전체 적용</span>
             </button>
           )}
@@ -909,9 +906,9 @@ export function App() {
               onClick={handleRevertInpainting}
               disabled={isProcessing}
               title="적용된 먼지 복원을 취소하고 작업 화면으로 되돌리기"
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#282828] hover:bg-[#333333] border border-[#383838] text-[#D4D4D4] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#C2C1BB] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
             >
-              <RotateCcw className="w-3 h-3 text-[#F59E0B]" />
+              <RotateCcw className="w-3 h-3 text-[#C2C1BB]" />
               <span className="hidden sm:inline">복원 되돌리기</span>
             </button>
           )}
@@ -920,10 +917,10 @@ export function App() {
             type="button"
             onClick={handleApplyInpainting}
             disabled={!sessionId || isProcessing}
-            className="flex items-center gap-1 px-3 py-1 rounded bg-[#0A84FF] hover:bg-[#0070E0] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
+            className="flex items-center gap-1 px-3 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
           >
             <Check className="w-3 h-3" />
-            <span>적용</span>
+            <span>3. 적용</span>
           </button>
 
           {/* Desktop Export Dropdown */}
@@ -932,28 +929,31 @@ export function App() {
               type="button"
               onClick={() => setIsExportMenuOpen((v) => !v)}
               disabled={!sessionId || isProcessing}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#282828] hover:bg-[#333333] border border-[#383838] text-[#E5E5E5] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
+              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
             >
               <Download className="w-3 h-3" />
-              <span>내보내기</span>
-              <ChevronDown className="w-3 h-3 text-[#8E8E8E]" />
+              <span>4. 내보내기</span>
+              <ChevronDown className="w-3 h-3 text-[#888783]" />
             </button>
 
             {isExportMenuOpen && (
-              <div className="absolute right-0 mt-1.5 w-56 rounded-md bg-[#222222] border border-[#383838] shadow-2xl py-1 z-50 text-xs">
-                <div className="px-3 py-1.5 border-b border-[#333333] space-y-1 text-[11px] text-[#A0A0A0]">
+              <div className="absolute right-0 mt-1.5 w-56 rounded-md bg-[#3A3A3D] border border-[#535356] shadow-2xl py-1 z-50 text-xs text-[#E7E6E1]">
+                <div className="px-3 py-1.5 border-b border-[#535356] space-y-1 text-[11px] text-[#C2C1BB]">
+                  <div className="flex items-center justify-between">
+                    <span>출력 상태</span>
+                    <span className="text-[10px] text-[#E7E6E1] font-semibold">
+                      {inpaintResult ? '적용된 버전' : '원본 버전 (미적용)'}
+                    </span>
+                  </div>
                   <div className="flex items-center justify-between">
                     <span>출력 해상도</span>
-                    <span className="font-mono text-[10px] text-[#E5E5E5] font-semibold">
+                    <span className="text-[10px] text-[#E7E6E1]">
                       {meta ? `${meta.fullWidth}×${meta.fullHeight} (1:1 원본)` : '1:1 원본'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
-                    <span className="flex items-center gap-1">
-                      <Palette className="w-3 h-3 text-[#5AC8FA]" />
-                      <span>색공간</span>
-                    </span>
-                    <span className="font-mono text-[10px] text-[#5AC8FA] font-medium">
+                    <span>색공간</span>
+                    <span className="text-[10px] text-[#E7E6E1] font-medium">
                       {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
                     </span>
                   </div>
@@ -961,45 +961,40 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => handleExportFormat('dng')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>DNG</span>
-                  <span className="font-mono text-[10px] opacity-75">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] opacity-75">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('tiff16')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>TIFF</span>
-                  <span className="font-mono text-[10px] opacity-75">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] opacity-75">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('png')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>PNG</span>
-                  <span className="font-mono text-[10px] opacity-75">무손실 · 1:1 원본</span>
+                  <span className="text-[10px] opacity-75">무손실 · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('jpg')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#0A84FF] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
                 >
                   <span>JPG</span>
-                  <span className="font-mono text-[10px] opacity-75">98% · 1:1 원본</span>
+                  <span className="text-[10px] opacity-75">98% · 1:1 원본</span>
                 </button>
-
-                <div className="px-2.5 py-1.5 bg-[#172019] border-t border-[#233528] flex items-center gap-1.5 text-[9.5px] text-[#34C759]">
-                  <ShieldCheck className="w-3 h-3 text-[#34C759] shrink-0" />
-                  <span>원본 해상도·색감 100% + 먼지만 제거</span>
-                </div>
 
                 {studioMode === 'sequence' && sequenceItems.length > 0 && (
                   <>
-                    <div className="my-1 border-t border-[#333333]" />
-                    <div className="px-3 py-1 text-[10px] text-[#8E8E8E]">
+                    <div className="my-1 border-t border-[#535356]" />
+                    <div className="px-3 py-1 text-[10px] text-[#888783]">
                       연속 {sequenceItems.length}장 ZIP
                     </div>
                     <div className="grid grid-cols-2 gap-1 px-2 pb-1">
@@ -1008,7 +1003,7 @@ export function App() {
                           key={fmt}
                           type="button"
                           onClick={() => handleBatchExportZip(fmt)}
-                          className="px-2 py-1 rounded bg-[#2C2C2C] hover:bg-[#0A84FF] hover:text-white text-[10px] font-mono uppercase text-center cursor-pointer"
+                          className="px-2 py-1 rounded bg-[#2B2B2E] hover:bg-[#556042] hover:text-white text-[10px] uppercase text-center cursor-pointer border border-[#535356]"
                         >
                           {fmt === 'tiff16' ? 'TIFF' : fmt}
                         </button>
@@ -1084,13 +1079,13 @@ export function App() {
             isSequenceMode={studioMode === 'sequence'}
           />
 
-          {/* Lightroom Bottom Filmstrip (Sequence Mode) */}
+          {/* Bottom Filmstrip (Sequence Mode) */}
           {studioMode === 'sequence' && (
-            <div className="h-16 md:h-20 bg-[#181818] border-t border-[#323232] px-3 flex items-center gap-2 overflow-x-auto shrink-0">
+            <div className="h-16 md:h-20 bg-[#2B2B2E] border-t border-[#535356] px-3 flex items-center gap-2 overflow-x-auto shrink-0">
               <button
                 type="button"
                 onClick={() => multiFileInputRef.current?.click()}
-                className="h-12 md:h-14 px-3 rounded border border-dashed border-[#3A3A3A] hover:border-[#0A84FF] text-[#9E9E9E] hover:text-white flex flex-col items-center justify-center gap-0.5 text-[10px] shrink-0 cursor-pointer"
+                className="h-12 md:h-14 px-3 rounded border border-dashed border-[#535356] hover:border-[#556042] text-[#888783] hover:text-white flex flex-col items-center justify-center gap-0.5 text-[10px] shrink-0 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>추가</span>
@@ -1106,8 +1101,8 @@ export function App() {
                     onClick={() => handleSelectSequenceItem(idx)}
                     className={`relative h-12 md:h-14 w-20 md:w-24 rounded overflow-hidden border transition-all shrink-0 cursor-pointer ${
                       isActive
-                        ? 'border-[#0A84FF] ring-1 ring-[#0A84FF]'
-                        : 'border-[#2E2E2E] opacity-70 hover:opacity-100'
+                        ? 'border-[#556042] ring-1 ring-[#556042]'
+                        : 'border-[#535356] opacity-70 hover:opacity-100'
                     }`}
                   >
                     <img
@@ -1116,16 +1111,16 @@ export function App() {
                       referrerPolicy="no-referrer"
                       className="w-full h-full object-cover"
                     />
-                    <div className="absolute inset-x-0 bottom-0 bg-black/75 px-1 py-0.5 flex items-center justify-between text-[9px] font-mono">
-                      <span className="text-[#D4D4D4]">#{idx + 1}</span>
-                      <span className="text-[#5AC8FA]">{activeCount}</span>
+                    <div className="absolute inset-x-0 bottom-0 bg-[#2B2B2E]/80 px-1 py-0.5 flex items-center justify-between text-[9px]">
+                      <span className="text-[#C2C1BB]">#{idx + 1}</span>
+                      <span className="text-[#E7E6E1]">{activeCount}</span>
                     </div>
                   </button>
                 );
               })}
 
               {multiReport && (
-                <div className="ml-auto pl-2 text-[11px] font-mono text-[#8E8E8E] whitespace-nowrap hidden sm:block">
+                <div className="ml-auto pl-2 text-[11px] text-[#888783] whitespace-nowrap hidden sm:block">
                   공통 먼지 {multiReport.multiConfirmedClusters}개
                 </div>
               )}
@@ -1133,14 +1128,14 @@ export function App() {
           )}
         </div>
 
-        {/* Desktop Right Collapsible Inspector Panel (Lightroom CC Develop Panel) */}
+        {/* Desktop Right Collapsible Inspector Panel */}
         {isRightDockOpen && (
-          <aside className="hidden md:flex w-[272px] bg-[#1E1E1E] border-l border-[#323232] flex-col overflow-y-auto shrink-0">
+          <aside className="hidden md:flex w-[272px] bg-[#3A3A3D] border-l border-[#535356] flex-col overflow-y-auto shrink-0">
             {/* Contextual Brush Bar */}
             {(interactionTool === 'deselect-brush' ||
               interactionTool === 'brush-add' ||
               interactionTool === 'brush-erase') && (
-              <div className="px-3.5 py-2.5 bg-[#252525] border-b border-[#323232]">
+              <div className="px-3.5 py-2.5 bg-[#2B2B2E] border-b border-[#535356]">
                 <div className="flex items-center justify-between text-[11px] mb-1">
                   <span className="font-medium text-white">
                     {interactionTool === 'deselect-brush'
@@ -1149,7 +1144,7 @@ export function App() {
                       ? '복원 브러시 반경'
                       : '마스크 지우개 반경'}
                   </span>
-                  <span className="font-mono text-[#0A84FF]">{brushRadius}px</span>
+                  <span className="text-[#556042] font-semibold">{brushRadius}px</span>
                 </div>
                 <input
                   type="range"
@@ -1164,7 +1159,7 @@ export function App() {
                     type="button"
                     onClick={handleUndo}
                     disabled={undoStack.length === 0 || isProcessing}
-                    className="flex-1 py-1 rounded bg-[#303030] hover:bg-[#3A3A3A] disabled:opacity-35 text-[11px] text-[#E5E5E5] flex items-center justify-center gap-1 cursor-pointer"
+                    className="flex-1 py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] disabled:opacity-35 text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1 cursor-pointer"
                   >
                     <Undo2 className="w-3 h-3" />
                     <span>되돌리기</span>
@@ -1173,7 +1168,7 @@ export function App() {
                     type="button"
                     onClick={handleRedo}
                     disabled={redoStack.length === 0 || isProcessing}
-                    className="flex-1 py-1 rounded bg-[#303030] hover:bg-[#3A3A3A] disabled:opacity-35 text-[11px] text-[#E5E5E5] flex items-center justify-center gap-1 cursor-pointer"
+                    className="flex-1 py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] disabled:opacity-35 text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1 cursor-pointer"
                   >
                     <Redo2 className="w-3 h-3" />
                     <span>다시 실행</span>
@@ -1186,7 +1181,7 @@ export function App() {
                       pushHistorySnapshot();
                       setManualStrokes([]);
                     }}
-                    className="mt-1.5 w-full py-1 rounded bg-[#303030] hover:bg-[#3A3A3A] text-[11px] text-[#D4D4D4] cursor-pointer"
+                    className="mt-1.5 w-full py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] text-[11px] text-[#C2C1BB] cursor-pointer"
                   >
                     수동 브러시 초기화 ({manualStrokes.length})
                   </button>
@@ -1195,19 +1190,19 @@ export function App() {
             )}
 
             {/* Accordion 1: 먼지 탐지 (Detection) */}
-            <div className="border-b border-[#323232]">
-              <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525]">
+            <div className="border-b border-[#535356]">
+              <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E]">
                 <button
                   type="button"
                   onClick={() =>
                     setOpenAccordions((p) => ({ ...p, detect: !p.detect }))
                   }
-                  className="flex items-center gap-1.5 text-xs font-semibold text-[#E5E5E5] cursor-pointer flex-1 text-left"
+                  className="flex items-center gap-1.5 text-xs font-semibold text-[#E7E6E1] cursor-pointer flex-1 text-left"
                 >
                   {openAccordions.detect ? (
-                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                    <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
                   ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                    <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
                   )}
                   <span>먼지 탐지</span>
                 </button>
@@ -1215,18 +1210,18 @@ export function App() {
                   type="button"
                   onClick={() => handleRedetect()}
                   disabled={!sessionId || isProcessing}
-                  title="재탐지"
-                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#2A2A2A] hover:bg-[#363636] text-[11px] text-[#D4D4D4] cursor-pointer disabled:opacity-40"
+                  title="분석 및 탐지"
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#556042] hover:bg-[#687652] text-[11px] text-white cursor-pointer disabled:opacity-40"
                 >
                   <RefreshCw className="w-3 h-3" />
-                  <span>재탐지</span>
+                  <span>분석</span>
                 </button>
               </div>
 
               {openAccordions.detect && (
                 <div className="px-3.5 pb-3 space-y-1">
                   {/* Method Segment */}
-                  <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#141414] border border-[#2E2E2E] rounded mb-2">
+                  <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#2B2B2E] border border-[#535356] rounded mb-2">
                     {(
                       [
                         { id: 'dual', label: '듀얼' },
@@ -1240,8 +1235,8 @@ export function App() {
                         onClick={() => handleRedetect({ method: m.id })}
                         className={`py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer ${
                           params.method === m.id
-                            ? 'bg-[#2E2E2E] text-white'
-                            : 'text-[#8E8E8E] hover:text-[#D4D4D4]'
+                            ? 'bg-[#556042] text-white'
+                            : 'text-[#888783] hover:text-[#C2C1BB]'
                         }`}
                       >
                         {m.label}
@@ -1293,16 +1288,16 @@ export function App() {
             </div>
 
             {/* Accordion 2: 복원 (Heal) */}
-            <div className="border-b border-[#323232]">
+            <div className="border-b border-[#535356]">
               <button
                 type="button"
                 onClick={() => setOpenAccordions((p) => ({ ...p, heal: !p.heal }))}
-                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#252525] text-xs font-semibold text-[#E5E5E5] cursor-pointer text-left"
+                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
                 {openAccordions.heal ? (
-                  <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
                 ) : (
-                  <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
                 )}
                 <span>복원 설정</span>
               </button>
@@ -1319,7 +1314,7 @@ export function App() {
                   />
 
                   <div className="flex items-center justify-between py-1">
-                    <span className="text-[11px] text-[#B8B8B8] font-medium">
+                    <span className="text-[11px] text-[#C2C1BB] font-medium">
                       센서 입자 유지
                     </span>
                     <button
@@ -1328,7 +1323,7 @@ export function App() {
                         setParams((p) => ({ ...p, preserveGrain: !p.preserveGrain }))
                       }
                       className={`w-8 h-4 rounded-full transition-colors relative cursor-pointer ${
-                        params.preserveGrain ? 'bg-[#0A84FF]' : 'bg-[#383838]'
+                        params.preserveGrain ? 'bg-[#556042]' : 'bg-[#535356]'
                       }`}
                     >
                       <span
@@ -1343,9 +1338,9 @@ export function App() {
                       type="button"
                       onClick={handleRevertInpainting}
                       disabled={isProcessing}
-                      className="w-full mt-1 py-1.5 rounded bg-[#2C2C2C] hover:bg-[#383838] border border-[#3E3E3E] text-[11px] text-[#E5E5E5] flex items-center justify-center gap-1.5 cursor-pointer"
+                      className="w-full mt-1 py-1.5 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1.5 cursor-pointer"
                     >
-                      <RotateCcw className="w-3 h-3 text-[#F59E0B]" />
+                      <RotateCcw className="w-3 h-3 text-[#C2C1BB]" />
                       <span>복원 되돌리기 (원본 작업 상태로)</span>
                     </button>
                   )}
@@ -1353,37 +1348,31 @@ export function App() {
               )}
             </div>
 
-            {/* Accordion: 색공간 및 ICC 프로파일 (Color Space & Gamut) */}
-            <div className="border-b border-[#323232]">
+            {/* Accordion 3: 색공간 및 ICC 프로파일 */}
+            <div className="border-b border-[#535356]">
               <button
                 type="button"
                 onClick={() =>
                   setOpenAccordions((p) => ({ ...p, colorSpace: !p.colorSpace }))
                 }
-                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] text-xs font-semibold text-[#E5E5E5] cursor-pointer text-left"
+                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
-                <div className="flex items-center gap-1.5">
-                  {openAccordions.colorSpace ? (
-                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
-                  ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
-                  )}
-                  <Palette className="w-3.5 h-3.5 text-[#5AC8FA]" />
-                  <span>색공간 및 ICC 프로파일</span>
-                </div>
-                <span className="font-mono text-[10px] text-[#5AC8FA] bg-[#222222] px-1.5 py-0.5 rounded border border-[#333333]">
-                  {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
-                </span>
+                {openAccordions.colorSpace ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                )}
+                <span>색공간 및 ICC 프로파일</span>
               </button>
 
               {openAccordions.colorSpace && (
                 <div className="px-3.5 pb-3 space-y-2.5">
                   {/* Detected color space readout */}
                   {meta && (
-                    <div className="p-2 rounded bg-[#161616] border border-[#2B2B2B] text-[11px]">
-                      <div className="flex items-center justify-between text-[#8E8E8E] mb-0.5">
+                    <div className="p-2 rounded bg-[#2B2B2E] border border-[#535356] text-[11px]">
+                      <div className="flex items-center justify-between text-[#888783] mb-0.5">
                         <span>원본 감지 색역</span>
-                        <span className="font-mono text-[#5AC8FA] font-medium">
+                        <span className="text-[#E7E6E1] font-medium">
                           {meta.detectedColorSpace === 'adobe-rgb'
                             ? 'Adobe RGB (1998)'
                             : meta.detectedColorSpace === 'display-p3'
@@ -1397,9 +1386,9 @@ export function App() {
                             : '자동 감지'}
                         </span>
                       </div>
-                      <div className="text-[10px] text-[#A0A0A0] flex items-center justify-between">
+                      <div className="text-[10px] text-[#C2C1BB] flex items-center justify-between">
                         <span>프로파일 출처</span>
-                        <span className="font-mono text-[#D4D4D4]">
+                        <span className="text-[#E7E6E1]">
                           {meta.hasEmbeddedIcc
                             ? '내장 ICC Profile (Tag 34675 / APP2)'
                             : 'EXIF ColorSpace 메타데이터'}
@@ -1410,9 +1399,9 @@ export function App() {
 
                   {/* Target Color Space Selector */}
                   <div className="space-y-1.5">
-                    <div className="text-[11px] text-[#B8B8B8] font-medium flex items-center justify-between">
+                    <div className="text-[11px] text-[#C2C1BB] font-medium flex items-center justify-between">
                       <span>내보내기 대상 색공간</span>
-                      <span className="text-[10px] text-[#8E8E8E]">16비트 리니어 매핑</span>
+                      <span className="text-[10px] text-[#888783]">16비트 리니어 매핑</span>
                     </div>
 
                     <div className="space-y-1">
@@ -1424,24 +1413,24 @@ export function App() {
                             onClick={() => setSelectedColorSpace(opt.id)}
                             className={`p-2 rounded border cursor-pointer transition-colors ${
                               isSelected
-                                ? 'bg-[#1C2638] border-[#0A84FF] text-white'
-                                : 'bg-[#181818] border-[#2C2C2C] text-[#C4C4C4] hover:bg-[#202020] hover:border-[#383838]'
+                                ? 'bg-[#556042]/30 border-[#556042] text-white'
+                                : 'bg-[#2B2B2E] border-[#535356] text-[#C2C1BB] hover:bg-[#3A3A3D]'
                             }`}
                           >
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-[11px] font-semibold flex items-center gap-1.5">
                                 <span
                                   className={`w-2 h-2 rounded-full ${
-                                    isSelected ? 'bg-[#0A84FF]' : 'bg-[#404040]'
+                                    isSelected ? 'bg-[#556042]' : 'bg-[#535356]'
                                   }`}
                                 />
                                 {opt.label}
                               </span>
-                              <span className="font-mono text-[9px] text-[#8E8E8E]">
+                              <span className="text-[9px] text-[#888783]">
                                 {opt.gamutCoverage}
                               </span>
                             </div>
-                            <p className="text-[10px] text-[#8E8E8E] leading-tight pl-3.5">
+                            <p className="text-[10px] text-[#888783] leading-tight pl-3.5">
                               {opt.description}
                             </p>
                           </div>
@@ -1449,106 +1438,83 @@ export function App() {
                       })}
                     </div>
                   </div>
-
-                  <p className="text-[10px] text-[#737373] leading-relaxed bg-[#141414] p-2 rounded border border-[#262626]">
-                    DNG, 16-bit TIFF, JPG 내보내기 시 위 규격의 공식 ICC v2.4 프로파일 및 DNG ColorMatrix 태그가 원본 파일에 함께 임베딩되어 모바일 갤러리 및 모니터에서 광색역을 왜곡 없이 정확하게 표시합니다.
-                  </p>
                 </div>
               )}
             </div>
 
-            {/* Accordion 3: 카메라 및 메타데이터 (Camera & EXIF) */}
-            <div className="border-b border-[#282828]">
+            {/* Accordion 4: 카메라 메타데이터 (EXIF) */}
+            <div className="border-b border-[#535356]">
               <button
                 type="button"
                 onClick={() =>
                   setOpenAccordions((p) => ({ ...p, metadata: !p.metadata }))
                 }
-                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] text-left cursor-pointer transition-colors"
+                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-[#E5E5E5]">
-                  {openAccordions.metadata ? (
-                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
-                  ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
-                  )}
-                  <Camera className="w-3.5 h-3.5 text-[#5AC8FA]" />
-                  <span>카메라 메타데이터 (EXIF)</span>
-                </div>
-                <span className="text-[10px] text-[#34C759] flex items-center gap-1 font-mono">
-                  <ShieldCheck className="w-3 h-3 text-[#34C759]" />
-                  <span>100% 보존</span>
-                </span>
+                {openAccordions.metadata ? (
+                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
+                ) : (
+                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                )}
+                <span>카메라 메타데이터 (EXIF)</span>
               </button>
 
               {openAccordions.metadata && (
-                <div className="p-3.5 space-y-3 bg-[#1C1C1C]">
+                <div className="p-3.5 space-y-3 bg-[#2B2B2E]">
                   {meta ? (
-                    <>
-                      <div className="space-y-1.5 text-[11px]">
-                        <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
-                          <span className="text-[#8E8E8E]">카메라 기종</span>
-                          <span className="text-[#E5E5E5] font-medium text-right max-w-[190px] truncate">
-                            {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ') || '카메라 태그 없음'}
+                    <div className="space-y-1.5 text-[11px]">
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                        <span className="text-[#888783]">카메라 기종</span>
+                        <span className="text-[#E7E6E1] font-medium text-right max-w-[190px] truncate">
+                          {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ') || '카메라 태그 없음'}
+                        </span>
+                      </div>
+                      {meta.exif.lensModel && (
+                        <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                          <span className="text-[#888783]">렌즈 모델</span>
+                          <span className="text-[#E7E6E1] font-medium text-right max-w-[190px] truncate" title={meta.exif.lensModel}>
+                            {meta.exif.lensModel}
                           </span>
                         </div>
-                        {meta.exif.lensModel && (
-                          <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
-                            <span className="text-[#8E8E8E]">렌즈 모델</span>
-                            <span className="text-[#E5E5E5] font-medium text-right max-w-[190px] truncate" title={meta.exif.lensModel}>
-                              {meta.exif.lensModel}
-                            </span>
-                          </div>
-                        )}
-                        <div className="grid grid-cols-2 gap-2 pt-0.5">
-                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
-                            <div className="text-[10px] text-[#8E8E8E]">조리개</div>
-                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
-                              {meta.exif.fNumber ? `f/${meta.exif.fNumber}` : '—'}
-                            </div>
-                          </div>
-                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
-                            <div className="text-[10px] text-[#8E8E8E]">셔터 스피드</div>
-                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
-                              {meta.exif.exposureTime || '—'}
-                            </div>
-                          </div>
-                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
-                            <div className="text-[10px] text-[#8E8E8E]">감도 (ISO)</div>
-                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
-                              {meta.exif.iso ? `ISO ${meta.exif.iso}` : '—'}
-                            </div>
-                          </div>
-                          <div className="bg-[#161616] p-2 rounded border border-[#262626]">
-                            <div className="text-[10px] text-[#8E8E8E]">초점거리</div>
-                            <div className="text-xs text-[#E5E5E5] font-mono font-medium">
-                              {meta.exif.focalLength || '—'}
-                            </div>
+                      )}
+                      <div className="grid grid-cols-2 gap-2 pt-0.5">
+                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
+                          <div className="text-[10px] text-[#888783]">조리개</div>
+                          <div className="text-xs text-[#E7E6E1] font-medium">
+                            {meta.exif.fNumber ? `f/${meta.exif.fNumber}` : '—'}
                           </div>
                         </div>
-
-                        {meta.exif.dateTime && (
-                          <div className="flex items-center justify-between py-1 border-b border-[#2A2A2A]">
-                            <span className="text-[#8E8E8E]">촬영 일시</span>
-                            <span className="text-[#D4D4D4] font-mono text-[10px]">
-                              {meta.exif.dateTime}
-                            </span>
+                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
+                          <div className="text-[10px] text-[#888783]">셔터 스피드</div>
+                          <div className="text-xs text-[#E7E6E1] font-medium">
+                            {meta.exif.exposureTime || '—'}
                           </div>
-                        )}
+                        </div>
+                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
+                          <div className="text-[10px] text-[#888783]">감도 (ISO)</div>
+                          <div className="text-xs text-[#E7E6E1] font-medium">
+                            {meta.exif.iso ? `ISO ${meta.exif.iso}` : '—'}
+                          </div>
+                        </div>
+                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
+                          <div className="text-[10px] text-[#888783]">초점거리</div>
+                          <div className="text-xs text-[#E7E6E1] font-medium">
+                            {meta.exif.focalLength || '—'}
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="p-2.5 rounded bg-[#131F17] border border-[#1E4D2B] text-[10px] space-y-1">
-                        <div className="flex items-center gap-1.5 text-[#34C759] font-medium">
-                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                          <span>DNG · TIFF · PNG · JPG 메타데이터 무손실 주입</span>
+                      {meta.exif.dateTime && (
+                        <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                          <span className="text-[#888783]">촬영 일시</span>
+                          <span className="text-[#C2C1BB] text-[10px]">
+                            {meta.exif.dateTime}
+                          </span>
                         </div>
-                        <p className="text-[#A1D9B4] leading-relaxed">
-                          카메라 이름, 렌즈 정보, 촬영 파라미터뿐만 아니라 원본 EXIF/XMP 바이너리 블록이 내보내기 파일 포맷에 맞게 100% 무손실로 보존 및 삽입됩니다.
-                        </p>
-                      </div>
-                    </>
+                      )}
+                    </div>
                   ) : (
-                    <div className="text-[11px] text-[#737373] text-center py-4">
+                    <div className="text-[11px] text-[#888783] text-center py-4">
                       이미지를 불러오면 카메라 및 EXIF 메타데이터가 표시됩니다.
                     </div>
                   )}
@@ -1556,29 +1522,29 @@ export function App() {
               )}
             </div>
 
-            {/* Accordion 4: 스팟 목록 (Spots) */}
+            {/* Accordion 5: 스팟 목록 (Spots) */}
             <div className="flex-1 flex flex-col min-h-[180px]">
-              <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] border-b border-[#282828]">
+              <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E] border-b border-[#535356]">
                 <button
                   type="button"
                   onClick={() =>
                     setOpenAccordions((p) => ({ ...p, spots: !p.spots }))
                   }
-                  className="flex items-center gap-1.5 text-xs font-semibold text-[#E5E5E5] cursor-pointer text-left"
+                  className="flex items-center gap-1.5 text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
                 >
                   {openAccordions.spots ? (
-                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                    <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
                   ) : (
-                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                    <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
                   )}
                   <span>스팟</span>
-                  <span className="font-mono text-[11px] text-[#8E8E8E] font-normal ml-1">
+                  <span className="text-[11px] text-[#888783] font-normal ml-1">
                     {enabledSpotsCount}/{spots.length}
                   </span>
                 </button>
 
                 {spots.length > 0 && (
-                  <div className="flex items-center gap-2 text-[11px] text-[#9E9E9E]">
+                  <div className="flex items-center gap-2 text-[11px] text-[#C2C1BB]">
                     <button
                       type="button"
                       onClick={() => handleToggleAllSpots(true)}
@@ -1599,9 +1565,9 @@ export function App() {
               </div>
 
               {openAccordions.spots && (
-                <div className="flex-1 overflow-y-auto divide-y divide-[#262626]">
+                <div className="flex-1 overflow-y-auto divide-y divide-[#535356]">
                   {spots.length === 0 ? (
-                    <div className="py-8 text-center text-[11px] text-[#737373]">
+                    <div className="py-8 text-center text-[11px] text-[#888783]">
                       검출된 스팟 없음
                     </div>
                   ) : (
@@ -1611,8 +1577,8 @@ export function App() {
                         <div
                           key={spot.id}
                           onClick={() => setSelectedSpotId(spot.id)}
-                          className={`flex items-center justify-between px-3.5 py-1.5 text-[11px] font-mono cursor-pointer transition-colors ${
-                            isSelected ? 'bg-[#2C2C2C]' : 'hover:bg-[#242424]'
+                          className={`flex items-center justify-between px-3.5 py-1.5 text-[11px] cursor-pointer transition-colors ${
+                            isSelected ? 'bg-[#556042]/30' : 'hover:bg-[#2B2B2E]'
                           }`}
                         >
                           <div className="flex items-center gap-2">
@@ -1623,24 +1589,24 @@ export function App() {
                                 e.stopPropagation();
                                 handleToggleSpot(spot.id);
                               }}
-                              className="accent-[#0A84FF] rounded-xs cursor-pointer"
+                              className="accent-[#556042] rounded-xs cursor-pointer"
                             />
                             <span
                               className={
                                 spot.enabled
-                                  ? 'text-[#E5E5E5]'
-                                  : 'text-[#666666] line-through'
+                                  ? 'text-[#E7E6E1]'
+                                  : 'text-[#888783] line-through'
                               }
                             >
                               #{spot.index}
                             </span>
                             {spot.isMultiConfirmed && (
-                              <span className="text-[10px] text-[#5AC8FA]">
+                              <span className="text-[10px] text-[#C2C1BB]">
                                 {spot.matchCount}f
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-2.5 text-[#8E8E8E]">
+                          <div className="flex items-center gap-2.5 text-[#888783]">
                             <span>{spot.radius}px</span>
                             <span className="w-11 text-right">
                               -{spot.contrastDropPct}%
@@ -1656,16 +1622,16 @@ export function App() {
           </aside>
         )}
 
-        {/* Desktop Rightmost Tool Rail (Lightroom CC Vertical Icon Strip) */}
-        <div className="hidden md:flex w-11 bg-[#181818] border-l border-[#323232] flex-col items-center py-2.5 gap-1.5 shrink-0">
+        {/* Desktop Rightmost Tool Rail */}
+        <div className="hidden md:flex w-11 bg-[#2B2B2E] border-l border-[#535356] flex-col items-center py-2.5 gap-1.5 shrink-0">
           <button
             type="button"
             onClick={() => setInteractionTool('inspect')}
-            title="선택 및 개별 토글 (I)"
+            title="선택 및 개별 토글"
             className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
               interactionTool === 'inspect'
-                ? 'bg-[#0A84FF] text-white'
-                : 'text-[#9E9E9E] hover:text-white hover:bg-[#262626]'
+                ? 'bg-[#556042] text-white'
+                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
             }`}
           >
             <MousePointer className="w-4 h-4" />
@@ -1674,11 +1640,11 @@ export function App() {
           <button
             type="button"
             onClick={() => setInteractionTool('deselect-brush')}
-            title="드래그 지우개 브러시 (D)"
+            title="드래그 지우개 브러시"
             className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
               interactionTool === 'deselect-brush'
-                ? 'bg-[#0A84FF] text-white'
-                : 'text-[#9E9E9E] hover:text-white hover:bg-[#262626]'
+                ? 'bg-[#556042] text-white'
+                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
             }`}
           >
             <Eraser className="w-4 h-4" />
@@ -1687,11 +1653,11 @@ export function App() {
           <button
             type="button"
             onClick={() => setInteractionTool('brush-add')}
-            title="수동 복원 브러시 (B)"
+            title="수동 복원 브러시"
             className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
               interactionTool === 'brush-add'
-                ? 'bg-[#0A84FF] text-white'
-                : 'text-[#9E9E9E] hover:text-white hover:bg-[#262626]'
+                ? 'bg-[#556042] text-white'
+                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
             }`}
           >
             <Paintbrush className="w-4 h-4" />
@@ -1700,23 +1666,23 @@ export function App() {
           <button
             type="button"
             onClick={() => setInteractionTool('brush-erase')}
-            title="수동 마스크 지우개 (E)"
+            title="수동 마스크 지우개"
             className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
               interactionTool === 'brush-erase'
-                ? 'bg-[#0A84FF] text-white'
-                : 'text-[#9E9E9E] hover:text-white hover:bg-[#262626]'
+                ? 'bg-[#556042] text-white'
+                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
             }`}
           >
             <RotateCcw className="w-4 h-4" />
           </button>
 
-          <div className="w-5 h-[1px] bg-[#323232] my-1" />
+          <div className="w-5 h-[1px] bg-[#535356] my-1" />
 
           <button
             type="button"
             onClick={() => setIsRightDockOpen((v) => !v)}
             title="패널 접기/펴기"
-            className="w-8 h-8 rounded flex items-center justify-center text-[#9E9E9E] hover:text-white hover:bg-[#262626] transition-colors cursor-pointer"
+            className="w-8 h-8 rounded flex items-center justify-center text-[#888783] hover:text-white hover:bg-[#3A3A3D] transition-colors cursor-pointer"
           >
             {isRightDockOpen ? (
               <PanelRightClose className="w-4 h-4" />
@@ -1727,11 +1693,11 @@ export function App() {
         </div>
       </div>
 
-      {/* Mobile Slide-Up Contextual Tray (Lightroom Mobile Style, < 768px) */}
+      {/* Mobile Slide-Up Contextual Tray */}
       {mobileTab && (
-        <div className="md:hidden bg-[#1E1E1E]/95 backdrop-blur-md border-t border-[#323232] px-4 pt-2.5 pb-3 z-30 shrink-0">
+        <div className="md:hidden bg-[#3A3A3D]/95 backdrop-blur-md border-t border-[#535356] px-4 pt-2.5 pb-3 z-30 shrink-0">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-semibold text-[#E5E5E5]">
+            <span className="text-xs font-semibold text-[#E7E6E1]">
               {mobileTab === 'tools' && '브러시 및 선택 도구'}
               {mobileTab === 'detect' && '먼지 탐지 설정'}
               {mobileTab === 'heal' && '복원 설정'}
@@ -1741,7 +1707,7 @@ export function App() {
             <button
               type="button"
               onClick={() => setMobileTab(null)}
-              className="p-1 text-[#8E8E8E] hover:text-white cursor-pointer"
+              className="p-1 text-[#888783] hover:text-white cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -1756,8 +1722,8 @@ export function App() {
                   onClick={() => setInteractionTool('inspect')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
                     interactionTool === 'inspect'
-                      ? 'bg-[#0A84FF] text-white'
-                      : 'bg-[#282828] text-[#B8B8B8]'
+                      ? 'bg-[#556042] text-white'
+                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
                   <MousePointer className="w-4 h-4" />
@@ -1768,8 +1734,8 @@ export function App() {
                   onClick={() => setInteractionTool('deselect-brush')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
                     interactionTool === 'deselect-brush'
-                      ? 'bg-[#0A84FF] text-white'
-                      : 'bg-[#282828] text-[#B8B8B8]'
+                      ? 'bg-[#556042] text-white'
+                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
                   <Eraser className="w-4 h-4" />
@@ -1780,8 +1746,8 @@ export function App() {
                   onClick={() => setInteractionTool('brush-add')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
                     interactionTool === 'brush-add'
-                      ? 'bg-[#0A84FF] text-white'
-                      : 'bg-[#282828] text-[#B8B8B8]'
+                      ? 'bg-[#556042] text-white'
+                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
                   <Paintbrush className="w-4 h-4" />
@@ -1792,8 +1758,8 @@ export function App() {
                   onClick={() => setInteractionTool('brush-erase')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
                     interactionTool === 'brush-erase'
-                      ? 'bg-[#0A84FF] text-white'
-                      : 'bg-[#282828] text-[#B8B8B8]'
+                      ? 'bg-[#556042] text-white'
+                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
                   <RotateCcw className="w-4 h-4" />
@@ -1817,7 +1783,7 @@ export function App() {
                   type="button"
                   onClick={handleUndo}
                   disabled={undoStack.length === 0 || isProcessing}
-                  className="min-h-[38px] rounded bg-[#282828] active:bg-[#383838] disabled:opacity-35 text-xs text-[#E5E5E5] flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="min-h-[38px] rounded bg-[#2B2B2E] border border-[#535356] disabled:opacity-35 text-xs text-[#E7E6E1] flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Undo2 className="w-3.5 h-3.5" />
                   <span>되돌리기</span>
@@ -1826,7 +1792,7 @@ export function App() {
                   type="button"
                   onClick={handleRedo}
                   disabled={redoStack.length === 0 || isProcessing}
-                  className="min-h-[38px] rounded bg-[#282828] active:bg-[#383838] disabled:opacity-35 text-xs text-[#E5E5E5] flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="min-h-[38px] rounded bg-[#2B2B2E] border border-[#535356] disabled:opacity-35 text-xs text-[#E7E6E1] flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <Redo2 className="w-3.5 h-3.5" />
                   <span>다시 실행</span>
@@ -1839,7 +1805,7 @@ export function App() {
           {mobileTab === 'detect' && (
             <div className="space-y-2 max-h-[210px] overflow-y-auto pr-1">
               <div className="flex items-center gap-1.5">
-                <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#141414] border border-[#2E2E2E] rounded flex-1">
+                <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#2B2B2E] border border-[#535356] rounded flex-1">
                   {(
                     [
                       { id: 'dual', label: '듀얼' },
@@ -1853,8 +1819,8 @@ export function App() {
                       onClick={() => handleRedetect({ method: m.id })}
                       className={`py-1 rounded-xs text-[11px] font-medium cursor-pointer ${
                         params.method === m.id
-                          ? 'bg-[#2E2E2E] text-white'
-                          : 'text-[#8E8E8E]'
+                          ? 'bg-[#556042] text-white'
+                          : 'text-[#888783]'
                       }`}
                     >
                       {m.label}
@@ -1865,10 +1831,10 @@ export function App() {
                   type="button"
                   onClick={() => handleRedetect()}
                   disabled={!sessionId || isProcessing}
-                  className="px-3 py-1.5 rounded bg-[#0A84FF] text-white text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer"
+                  className="px-3 py-1.5 rounded bg-[#556042] text-white text-xs font-medium flex items-center gap-1 shrink-0 cursor-pointer"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>재탐지</span>
+                  <span>먼지 분석</span>
                 </button>
               </div>
 
@@ -1919,14 +1885,14 @@ export function App() {
                 onChange={(v) => setParams((p) => ({ ...p, inpaintRadius: v }))}
               />
               <div className="flex items-center justify-between py-1">
-                <span className="text-xs text-[#B8B8B8]">센서 입자 유지</span>
+                <span className="text-xs text-[#C2C1BB]">센서 입자 유지</span>
                 <button
                   type="button"
                   onClick={() =>
                     setParams((p) => ({ ...p, preserveGrain: !p.preserveGrain }))
                   }
                   className={`w-9 h-5 rounded-full transition-colors relative cursor-pointer ${
-                    params.preserveGrain ? 'bg-[#0A84FF]' : 'bg-[#383838]'
+                    params.preserveGrain ? 'bg-[#556042]' : 'bg-[#535356]'
                   }`}
                 >
                   <span
@@ -1941,9 +1907,9 @@ export function App() {
                   type="button"
                   onClick={handleRevertInpainting}
                   disabled={isProcessing}
-                  className="w-full min-h-[40px] rounded bg-[#282828] active:bg-[#383838] border border-[#3E3E3E] text-xs text-[#E5E5E5] flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="w-full min-h-[40px] rounded bg-[#2B2B2E] border border-[#535356] text-xs text-[#E7E6E1] flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  <RotateCcw className="w-3.5 h-3.5 text-[#F59E0B]" />
+                  <RotateCcw className="w-3.5 h-3.5 text-[#C2C1BB]" />
                   <span>복원 되돌리기</span>
                 </button>
               )}
@@ -1953,12 +1919,12 @@ export function App() {
           {/* Mobile Tab 4: Spots */}
           {mobileTab === 'spots' && (
             <div>
-              <div className="flex items-center justify-between mb-2 text-xs text-[#9E9E9E]">
+              <div className="flex items-center justify-between mb-2 text-xs text-[#C2C1BB]">
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
                     onClick={() => handleToggleAllSpots(true)}
-                    className="text-[#0A84FF] font-medium cursor-pointer"
+                    className="text-[#E7E6E1] font-medium cursor-pointer"
                   >
                     전체 선택
                   </button>
@@ -1971,25 +1937,25 @@ export function App() {
                   </button>
                 </div>
               </div>
-              <div className="max-h-[150px] overflow-y-auto divide-y divide-[#2A2A2A]">
+              <div className="max-h-[150px] overflow-y-auto divide-y divide-[#535356]">
                 {spots.map((spot) => (
                   <div
                     key={spot.id}
                     onClick={() => handleToggleSpot(spot.id)}
-                    className="flex items-center justify-between py-2 text-xs font-mono cursor-pointer"
+                    className="flex items-center justify-between py-2 text-xs cursor-pointer"
                   >
                     <div className="flex items-center gap-2">
                       <input
                         type="checkbox"
                         checked={spot.enabled}
                         onChange={() => {}}
-                        className="accent-[#0A84FF]"
+                        className="accent-[#556042]"
                       />
-                      <span className={spot.enabled ? 'text-white' : 'text-[#666666]'}>
+                      <span className={spot.enabled ? 'text-white' : 'text-[#888783]'}>
                         #{spot.index}
                       </span>
                     </div>
-                    <span className="text-[#8E8E8E]">
+                    <span className="text-[#888783]">
                       {spot.radius}px · -{spot.contrastDropPct}%
                     </span>
                   </div>
@@ -2001,35 +1967,6 @@ export function App() {
           {/* Mobile Tab 5: Export */}
           {mobileTab === 'export' && (
             <div className="space-y-2.5">
-              {/* Mobile Color Space Selector */}
-              <div className="pb-2 border-b border-[#323232]">
-                <div className="flex items-center justify-between text-[11px] mb-1.5">
-                  <span className="flex items-center gap-1 text-[#B8B8B8] font-medium">
-                    <Palette className="w-3 h-3 text-[#5AC8FA]" />
-                    <span>내보내기 색공간 (광색역)</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-[#5AC8FA]">
-                    {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel}
-                  </span>
-                </div>
-                <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
-                  {COLOR_SPACE_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setSelectedColorSpace(opt.id)}
-                      className={`px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
-                        selectedColorSpace === opt.id
-                          ? 'bg-[#0A84FF] text-white'
-                          : 'bg-[#262626] text-[#A0A0A0] hover:text-white'
-                      }`}
-                    >
-                      {opt.shortLabel}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               <div className="grid grid-cols-2 gap-2">
                 {(
                   [
@@ -2044,34 +1981,29 @@ export function App() {
                     type="button"
                     disabled={!sessionId || isProcessing}
                     onClick={() => handleExportFormat(fmt.id)}
-                    className="min-h-[44px] px-3 py-2 rounded bg-[#282828] active:bg-[#0A84FF] border border-[#383838] flex items-center justify-between text-xs font-medium cursor-pointer"
+                    className="min-h-[44px] px-3 py-2 rounded bg-[#2B2B2E] border border-[#535356] flex items-center justify-between text-xs font-medium cursor-pointer"
                   >
                     <span>{fmt.label}</span>
-                    <span className="font-mono text-[10px] text-[#8E8E8E]">
+                    <span className="text-[10px] text-[#888783]">
                       {exportingFormat === fmt.id ? '...' : fmt.sub}
                     </span>
                   </button>
                 ))}
               </div>
 
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-[#172019] border border-[#233528] text-[10px] text-[#34C759]">
-                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                <span>카메라 기종, 렌즈 및 EXIF/XMP 바이너리 100% 보존</span>
-              </div>
-
               {studioMode === 'sequence' && sequenceItems.length > 0 && (
-                <div className="pt-1 border-t border-[#323232] grid grid-cols-2 gap-2">
+                <div className="pt-1 border-t border-[#535356] grid grid-cols-2 gap-2">
                   <button
                     type="button"
                     onClick={() => handleBatchExportZip('dng')}
-                    className="min-h-[40px] rounded bg-[#0A84FF]/20 border border-[#0A84FF]/50 text-[#5AC8FA] text-xs font-medium cursor-pointer"
+                    className="min-h-[40px] rounded bg-[#556042]/30 border border-[#556042] text-[#E7E6E1] text-xs font-medium cursor-pointer"
                   >
                     전체 DNG ZIP
                   </button>
                   <button
                     type="button"
                     onClick={() => handleBatchExportZip('jpg')}
-                    className="min-h-[40px] rounded bg-[#0A84FF]/20 border border-[#0A84FF]/50 text-[#5AC8FA] text-xs font-medium cursor-pointer"
+                    className="min-h-[40px] rounded bg-[#556042]/30 border border-[#556042] text-[#E7E6E1] text-xs font-medium cursor-pointer"
                   >
                     전체 JPG ZIP
                   </button>
@@ -2082,8 +2014,8 @@ export function App() {
         </div>
       )}
 
-      {/* Mobile Fixed Bottom Icon Dock (Lightroom Mobile Style, < 768px) */}
-      <nav className="md:hidden h-14 bg-[#181818] border-t border-[#323232] grid grid-cols-5 items-center shrink-0 z-30">
+      {/* Mobile Fixed Bottom Icon Dock */}
+      <nav className="md:hidden h-14 bg-[#2B2B2E] border-t border-[#535356] grid grid-cols-5 items-center shrink-0 z-30">
         {(
           [
             { id: 'tools', label: '도구', icon: Eraser },
@@ -2092,22 +2024,20 @@ export function App() {
             { id: 'spots', label: '스팟', icon: ListFilter },
             { id: 'export', label: '내보내기', icon: Download },
           ] as const
-        ).map((item) => {
-          const Icon = item.icon;
-          const isActive = mobileTab === item.id;
+        ).map((tab) => {
+          const Icon = tab.icon;
+          const isActive = mobileTab === tab.id;
           return (
             <button
-              key={item.id}
+              key={tab.id}
               type="button"
-              onClick={() => setMobileTab(isActive ? null : item.id)}
-              className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 transition-colors cursor-pointer ${
-                isActive ? 'text-[#0A84FF]' : 'text-[#9E9E9E] active:text-white'
+              onClick={() => setMobileTab((curr) => (curr === tab.id ? null : tab.id))}
+              className={`h-full flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+                isActive ? 'text-[#556042] bg-[#3A3A3D]' : 'text-[#888783] hover:text-[#E7E6E1]'
               }`}
             >
               <Icon className="w-4 h-4" />
-              <span className="text-[10px] font-medium tracking-tight">
-                {item.label}
-              </span>
+              <span>{tab.label}</span>
             </button>
           );
         })}
@@ -2115,4 +2045,5 @@ export function App() {
     </div>
   );
 }
+
 export default App;

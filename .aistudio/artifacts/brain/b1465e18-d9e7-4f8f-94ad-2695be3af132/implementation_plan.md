@@ -1,114 +1,105 @@
-# DNG·TIFF·JPG·PNG 전 포맷 카메라 및 EXIF/XMP 메타데이터 완전 보존 엔진
+# SensorClean UI 디자인 및 워크플로우 개편 계획
 
-카메라 원본 파일(RAW, RW2, DNG, TIFF, JPEG)에서 카메라 제조사(Make), 모델(Model), 렌즈 정보(LensModel), 촬영 파라미터(셔터스피드, 조리개, ISO, 초점거리, 화이트밸런스 등) 및 EXIF/XMP 바이너리 블록을 완전히 파싱하여 보존하고, DNG·16비트 TIFF·JPG·PNG로 내보낼 때 100% 무손실로 주입하는 시스템을 구현합니다.
+사용자 요청에 따라 SensorClean의 시각 디자인(하이라이트 컬러, 흑백 팔레트, 폰트)을 전면 갱신하고, 인스펙터 탭을 간결하게 정리하며, 4단계 워크플로우(이미지 로딩 → 먼지 분석 버튼/스팟 선택 → 적용 → 내보내기)로 사용성을 개선합니다.
 
-## User Review & Critical Decisions
+---
+
+## 사용자 검토 및 주요 결정 사항
 
 > [!IMPORTANT]
-> 사용자가 Phase 1 질문을 통해 확정한 요구사항을 반영하였습니다:
-> - **보존 범위**: 카메라 제조사, 모델, 렌즈 및 모든 EXIF 태그(EXIF IFD, GPS, 촬영 설정) 완전 보존.
-> - **주입 방식**: EXIF 및 XMP 바이너리 블록을 원본 규격에 맞추어 무손실 직접 주입 (DNG/TIFF IFD 링크, JPEG APP1 마커 세그먼트, PNG eXIf/iTXt 청크).
-
-- **확정된 결정 1**: 모든 내보내기 포맷(DNG, TIFF, JPG, PNG)에서 카메라 모델명 및 렌즈 정보가 윈도우 탐색기, 맥 Finder, 라이트룸, 스마트폰 갤러리 상세정보에서 그대로 유지되도록 합니다.
-- **확정된 결정 2**: 먼지가 제거된 픽셀 데이터만 정밀 복원되고, 카메라 메타데이터 및 ICC 광색역 프로파일은 원본과 동일하게 1:1 패키징됩니다.
-
----
-
-## 1. Overview & Core Concept
-
-- **목적**: 사용자가 센서 먼지를 제거한 후 사진을 내보냈을 때 카메라 모델명(`Lumix DC-G9`, `Sony ILCE-7M4`, `Canon EOS R5` 등), 렌즈 정보, 촬영 일시, ISO, 셔터스피드, 조리개, 색온도, GPS 정보 등이 삭제되거나 "Unknown"으로 유실되는 문제를 방지합니다.
-- **지원 대상**:
-  - **입력**: RAW(.rw2, .cr2, .cr3, .nef, .arw, .orf, .raf), .dng, .tif/.tiff, .jpg/.jpeg, .png
-  - **출력**:
-    - **DNG (16-bit)**: IFD0 (카메라 제조사/모델, 소프트웨어, 일시) + ExifIFD (태그 34665: 노출값, 렌즈, ISO 등) + XMP (태그 700) + ICC (태그 34675)
-    - **TIFF (16-bit)**: 표준 ExifIFD 서브 디렉터리 및 원본 메타데이터 완벽 복제
-    - **JPG (98%)**: `APP1` (`\xFF\xE1`) Exif 블록 + `APP1` XMP 블록 + `APP2` ICC 프로파일 직접 주입
-    - **PNG (무손실)**: 표준 `eXIf` 청크 및 `iTXt` (XMP) 청크 주입
+> **확인된 요구사항 요약**:
+> 1. **하이라이트 컬러**: `#556042` (올리브 카키 그린 톤)
+> 2. **그레이 & 블랙 팔레트**: `#2B2B2E`(배경), `#3A3A3D`(패널/헤더), `#535356`(경계선), `#888783`(보조 텍스트/아이콘), `#C2C1BB`(보조 텍스트), `#E7E6E1`(메인 텍스트)로 통일
+> 3. **타이포그래피**: `font-mono` 클래스 제거. 영문 `IBM Plex Sans`, 한글 `Pretendard` 적용
+> 4. **인스펙터 탭 헤더 정리**: `색공간 및 ICC 프로파일`과 `카메라 메타데이터 (EXIF)`에서 앞쪽 SVG 아이콘과 뒤쪽 배지(원본 유지, 100% 보존 등) 제거하고 메인 텍스트만 깔끔하게 유지
+> 5. **메타데이터 설명 카드 삭제**: 카메라 메타데이터 탭 하단의 "DNG · TIFF · PNG · JPG 메타데이터 무손실 주입..." 녹색 테두리 안내 카드 완전 삭제
+> 6. **4단계 워크플로우**:
+>    - Step 1: 이미지 로딩 (자동 탐지 실행 안 함, 원본 이미지만 즉시 깔끔하게 로딩 및 표시)
+>    - Step 2: "먼지 분석" 버튼을 누르거나 직접 브러시/클릭으로 스팟 위치 선택
+>    - Step 3: "적용" 버튼을 눌러 인페인팅 적용
+>    - Step 4: "내보내기" (적용 전이면 원본 1:1 그대로 내보내고, 적용 후면 먼지 제거된 상태로 내보냄)
 
 ---
 
-## 2. Technical Architecture & Component Flow
+## 1. 개요 및 사용자 경험
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        Original Image File (Client)                    │
-│    (RAW / RW2 / DNG / TIFF / JPEG / PNG with embedded EXIF & XMP)      │
-└────────────────────────────────────┬───────────────────────────────────┘
-                                     │
-                                     ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│             tiffRawDecoder.ts (Metadata Extraction Engine)             │
-│  - Parses IFD0 Tags: Make, Model, DateTime, Software, Artist, etc.     │
-│  - Parses ExifIFD Tags: ExposureTime, FNumber, ISO, LensModel, etc.    │
-│  - Captures Raw APP1 EXIF segment bytes (\xFF\xE1)                     │
-│  - Captures Raw XMP packet bytes (Tag 700 or http://ns.adobe.com...)   │
-│  - Captures Raw GPS IFD block if present                              │
-└────────────────────────────────────┬───────────────────────────────────┘
-                                     │
-                                     ▼ SessionMetadata (stores enriched EXIF)
-┌────────────────────────────────────────────────────────────────────────┐
-│               sensorWorker.ts (Inpaint + Package Coordinator)          │
-│  - Performs 16-bit sensor dust inpainting on image channels            │
-│  - Forwards complete SessionMetadata to binary exporters               │
-└──────────────────┬─────────────────┬──────────────────┬────────────────┘
-                   │                 │                  │
-                   ▼                 ▼                  ▼
-┌─────────────────────────┐ ┌──────────────────┐ ┌──────────────────────┐
-│  writeLinearDngBuffer   │ │ writeTiff16Buffer│ │ injectExifAndIccTo   │
-│  (Dual-IFD DNG 1.4)     │ │ (16-bit TIFF)    │ │ Jpeg / PNG           │
-│  - IFD0 Make/Model/Date │ │ - Standard       │ │ - APP1 EXIF Segment  │
-│  - Tag 34665: ExifIFD   │ │   ExifIFD subIFD │ │ - APP1 XMP Segment   │
-│  - Tag 34853: GPS IFD   │ │ - Tag 34675: ICC │ │ - APP2 ICC Profile   │
-│  - Tag 700: XMP Packet  │ │ - Tag 700: XMP   │ │ - PNG eXIf/iTXt      │
-└─────────────────────────┘ └──────────────────┘ └──────────────────────┘
+│  [1. 이미지 로딩] ───> [2. 먼지 분석 버튼 클릭] ───> [3. 적용] ───> [4. 내보내기]│
+│  원본 1:1 즉시 표시      스팟 자동 검출 / 브러시        인페인팅 실행     보정본 또는 원본 │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 3. Key Implementation Steps
-
-### 3.1 Metadata Extraction (`/src/engine/tiffRawDecoder.ts`)
-- **EXIF IFD 확장 태그 수집**:
-  - `LensModel` (Tag 42036 / 0xA434), `LensMake` (Tag 42035)
-  - `ShutterSpeedValue` (Tag 37377), `ApertureValue` (Tag 37378), `ExposureBiasValue` (Tag 37380)
-  - `MeteringMode` (Tag 37383), `Flash` (Tag 37385), `WhiteBalance` (Tag 41987)
-  - `FocalLengthIn35mmFilm` (Tag 41989)
-  - `Artist` (Tag 315), `Copyright` (Tag 33432), `DateTimeOriginal` (Tag 36867)
-- **JPEG APP1 Segment 추출**:
-  - `\xFF\xE1` 마커 중 `Exif\0\0` 헤더를 가진 전체 바이너리 블록 추출.
-  - `\xFF\xE1` 마커 중 `http://ns.adobe.com/xap/1.0/\0` 헤더를 가진 XMP 패킷 추출.
-- **TIFF/RAW 원본 ExifIFD 서브블록 보존**:
-  - TIFF 태그 34665(ExifIFD), 태그 700(XMP), 태그 34853(GPS IFD)의 바이트 스트림을 `SessionMetadata`에 원본 그대로 보관.
-
-### 3.2 DNG & TIFF ExifIFD Sub-Directory Builder (`/src/engine/binaryExporters.ts`)
-- **IFD0 메타데이터 강화**:
-  - 태그 271 (`Make`), 태그 272 (`Model`), 태그 306 (`DateTime`), 태그 305 (`Software`), 태그 315 (`Artist`), 태그 33432 (`Copyright`).
-- **ExifIFD (Tag 34665) 서브 IFD 자동 생성**:
-  - 노출 시간(태그 33434), 조리개(태그 33437), ISO(태그 34855), 촬영 일시(태그 36867/36868), 초점거리(태그 37386), 렌즈 모델(태그 42036) 등을 표준 규격에 맞게 인코딩하여 IFD0 내부 포인터로 연결.
-- **XMP (Tag 700) & ICC (Tag 34675) 연동**:
-  - 원본에 XMP가 있거나 추가 메타데이터가 있는 경우 태그 700으로 안전하게 연결.
-
-### 3.3 JPEG & PNG 메타데이터 바이너리 주입 (`/src/engine/binaryExporters.ts`)
-- **JPEG**:
-  - 파일 헤더 구조: `SOI (\xFF\xD8)` -> `APP1 (EXIF)` -> `APP1 (XMP)` -> `APP2 (ICC Profile)` -> DQT/SOF/SOS 이미지 스트림.
-  - 브라우저 캔버스가 잃어버리는 모든 EXIF 및 XMP를 원래 파일의 마커 세그먼트와 합성.
-- **PNG**:
-  - PNG 헤더 (`\x89PNG\r\n\x1a\n`) 바로 다음 `IHDR` 청크 뒤에 표준 `eXIf` 청크(EXIF raw bytes) 및 `iTXt` 청크(XMP 메타데이터) 삽입.
-
-### 3.4 UI 및 메타데이터 인스펙터 연동 (`/src/App.tsx`)
-- 우측 인스펙터 및 상단 헤더에 카메라 바디 및 렌즈 모델 정보 표시 (예: `Panasonic DC-G9 · LEICA DG 12-60mm`).
-- "메타데이터 보존됨" 뱃지 제공으로 사용자가 안심하고 작업할 수 있도록 피드백 제공.
+- **직관적인 단계별 제어**: 이미지 파일을 열었을 때 자동으로 스팟 분석이 돌아가지 않고 원본이 먼저 깨끗하게 표시됩니다. 사용자가 원할 때 상단/도구 바의 **`먼지 분석`** 버튼을 눌러 탐지하거나 직접 마우스로 스팟을 추가할 수 있습니다.
+- **적용/미적용 내보내기 보장**: 적용 버튼을 누르지 않은 상태에서 내보내면 원본 사진 그대로 1:1 내보내기가 실행되며, 적용 버튼을 누른 후 내보내면 먼지가 복원된 버전으로 내보내집니다.
+- **절제된 다크룸 인터페이스**: 화려한 형광 파란색 대신 차분하고 전문적인 `#556042` 하이라이트와 부드러운 다크 그레이 계열로 전환하여 사진 본연의 색상과 디테일에 집중할 수 있습니다.
 
 ---
 
-## 4. Verification & Testing Plan
+## 2. 시각 디자인 & 타이포그래피 사양
 
-1. **빌드 검증**:
-   - `lint_applet` 및 `compile_applet` 통과 확인 (TypeScript 0 errors).
-2. **바이너리 태그 정합성 검증**:
-   - DNG 파일: TIFF 헤더 `II (0x4949)`, IFD0의 태그 271(Make), 272(Model), 34665(ExifIFD) 오프셋 정상 점검.
-   - TIFF 파일: 16비트 포맷에서 ExifIFD 및 ICC 태그 34675 동시 존재 확인.
-   - JPEG 파일: `FF D8 FF E1 [EXIF] FF E1 [XMP] FF E2 [ICC]` 헤더 정합성 확인.
-   - PNG 파일: `eXIf` 청크 CRC32 체크섬 계산 및 유효성 확인.
-3. **윈도우 / 맥 / 모바일 호환성**:
-   - 출력된 파일을 사진 뷰어 또는 EXIF 리더에서 열었을 때 카메라 이름, 셔터, 조리개, ISO, 날짜가 완전히 표시되는지 확인.
+### 색상 토큰 맵
+- **Highlight (강조 / 선택 / 기본 버튼)**: `#556042`
+- **Highlight Hover / Active**: `#677450`
+- **Background (캔버스 및 앱 전체 배경)**: `#2B2B2E`
+- **Surface / Panel (헤더, 사이드바, 바텀 독)**: `#3A3A3D`
+- **Border / Divider (테두리 및 구분선)**: `#535356`
+- **Text Muted (라벨, 단위, 힌트)**: `#888783`
+- **Text Sub (중간 텍스트, 보조 값)**: `#C2C1BB`
+- **Text Primary (주요 텍스트, 제목, 파일명)**: `#E7E6E1`
+
+### 폰트 적용
+- `index.html`: Google Fonts의 `IBM Plex Sans` preload 및 stylesheet 추가
+- `src/index.css`: Pretendard 웹폰트 `@import` 및 기본 폰트 패밀리 선언
+  ```css
+  @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css");
+  
+  body {
+    font-family: 'IBM Plex Sans', 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  }
+  ```
+- 코드 내 `font-mono` 클래스를 제거하여 전체적으로 일관되고 정돈된 타이포그래피 유지
+
+---
+
+## 3. UI 정리 및 워크플로우 변경 세부 사항
+
+### A. 인스펙터 아코디언 헤더 단순화
+- **색공간 및 ICC**:
+  - 변경 전: `[Palette SVG] 색공간 및 ICC 프로파일 [원본 유지 칩]`
+  - 변경 후: `색공간 및 ICC 프로파일` (접기/펼치기 화살표와 텍스트만 깔끔하게 노출)
+- **카메라 메타데이터 (EXIF)**:
+  - 변경 전: `[Camera SVG] 카메라 메타데이터 (EXIF) [ShieldCheck 100% 보존]`
+  - 변경 후: `카메라 메타데이터 (EXIF)` (접기/펼치기 화살표와 텍스트만 노출)
+- **메타데이터 카드 삭제**:
+  - 메타데이터 상세 하단의 녹색 보증 카드(`DNG · TIFF · PNG · JPG 메타데이터 무손실 주입...`) 코드 제거
+
+### B. 로딩 및 분석 워크플로우 분리
+- **파일 로딩 시 (`handleUploadSingle`, `handleUploadSequence`)**:
+  - 원본 이미지 디코딩(`ingest_only` 또는 검출 제외)만 수행하여 원본 프리뷰 화면을 즉시 띄웁니다.
+  - `spots: []`, `inpaintResult: null` 상태로 시작하며 오버레이가 비활성화됩니다.
+- **먼지 분석 버튼 (`먼지 분석` / Dust Analysis)**:
+  - 상단 툴바 및 탐지 탭에 명확한 `먼지 분석` 버튼 배치 (하이라이트 컬러 `#556042`).
+  - 사용자가 이 버튼을 클릭하면 세션의 `detGray` 데이터를 기반으로 먼지 스팟을 탐지하고 목록에 표시합니다.
+- **적용 (`적용` / Apply)**:
+  - 탐지된 스팟 및 브러시 스트로크를 바탕으로 인페인팅 실행 후 보정 프리뷰 표시.
+- **내보내기 (`내보내기` / Export)**:
+  - `inpaintResult`가 없는 경우: 원본 이미지 버퍼를 그대로 지정된 포맷(DNG, TIFF, PNG, JPG)으로 내보냄.
+  - `inpaintResult`가 있는 경우: 먼지가 복원된 버퍼로 내보냄.
+
+---
+
+## 4. 변경 대상 파일
+
+1. `/index.html`: `IBM Plex Sans` 폰트 링크 추가
+2. `/src/index.css`: `Pretendard` import 및 전역 폰트/팔레트 스타일 지정
+3. `/src/App.tsx`:
+   - 색상 클래스 전면 교체 (`#0A84FF` / `#5AC8FA` -> `#556042`, 기타 색상들을 요청 팔레트로 교체)
+   - `font-mono` 제거
+   - 색공간/메타데이터 탭 헤더 SVG 및 칩 제거
+   - 메타데이터 하단 설명 카드 삭제
+   - 이미지 로딩 후 자동 탐지 중단 및 "먼지 분석" 액션 버튼 워크플로우 연결
+   - 미적용/적용 상태에 따른 내보내기 처리
+4. `/src/components/DarkroomCanvas.tsx`: 캔버스 UI 및 오버레이 테마 컬러를 `#556042` 및 지정 팔레트 톤에 맞춤
+
+계획을 검토하신 후 **Proceed** 버튼을 눌러주시면 즉시 구현을 진행하겠습니다.
