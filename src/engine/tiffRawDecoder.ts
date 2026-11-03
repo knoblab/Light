@@ -1,4 +1,4 @@
-import { ExifMetadata } from '../types/sensor';
+import { ColorSpaceId, ExifMetadata } from '../types/sensor';
 
 export interface DecodedImagePayload {
   fullWidth: number;
@@ -11,6 +11,8 @@ export interface DecodedImagePayload {
   isRaw: boolean;
   extension: string;
   exposureScale: number;
+  detectedColorSpace: ColorSpaceId;
+  rawIccProfileBytes?: Uint8Array;
   exif: ExifMetadata;
 }
 
@@ -65,6 +67,8 @@ interface TiffIfdSummary {
   model?: string;
   dateTime?: string;
   software?: string;
+  iccProfileBytes?: Uint8Array;
+  colorSpaceTag?: number;
 }
 
 function readAscii(view: DataView, offset: number, count: number): string {
@@ -76,6 +80,86 @@ function readAscii(view: DataView, offset: number, count: number): string {
     if (ch >= 32 && ch <= 126) out += String.fromCharCode(ch);
   }
   return out.trim();
+}
+
+/**
+ * Parses an embedded ICC Profile description to identify known wide gamut color spaces.
+ */
+export function detectColorSpaceFromIcc(iccBytes: Uint8Array): ColorSpaceId {
+  try {
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(iccBytes);
+    const lower = text.toLowerCase();
+    if (lower.includes('adobe rgb') || lower.includes('adobergb') || lower.includes('adobe-rgb')) {
+      return 'adobe-rgb';
+    }
+    if (lower.includes('display p3') || lower.includes('display-p3') || lower.includes('dci-p3') || lower.includes('dci p3')) {
+      return 'display-p3';
+    }
+    if (lower.includes('bt.2020') || lower.includes('bt2020') || lower.includes('rec.2020') || lower.includes('rec2020')) {
+      return 'bt2020';
+    }
+    if (lower.includes('prophoto') || lower.includes('romm rgb') || lower.includes('pro photo')) {
+      return 'prophoto-rgb';
+    }
+    if (lower.includes('srgb') || lower.includes('s-rgb')) {
+      return 'srgb';
+    }
+  } catch {
+    // Ignore decode errors
+  }
+  return 'srgb';
+}
+
+/**
+ * Extracts ICC Profile binary from JPEG APP2 marker segments (\xFF\xE2).
+ */
+export function extractJpegIccProfile(bytes: Uint8Array): Uint8Array | null {
+  const len = bytes.length;
+  const chunks: Array<{ seq: number; total: number; data: Uint8Array }> = [];
+
+  for (let i = 0; i < len - 18; i++) {
+    if (bytes[i] === 0xff && bytes[i + 1] === 0xe2) {
+      const segLen = (bytes[i + 2] << 8) | bytes[i + 3];
+      if (segLen < 16 || i + 2 + segLen > len) continue;
+
+      // Check header "ICC_PROFILE\0"
+      if (
+        bytes[i + 4] === 0x49 && // 'I'
+        bytes[i + 5] === 0x43 && // 'C'
+        bytes[i + 6] === 0x43 && // 'C'
+        bytes[i + 7] === 0x5f && // '_'
+        bytes[i + 8] === 0x50 && // 'P'
+        bytes[i + 9] === 0x52 && // 'R'
+        bytes[i + 10] === 0x4f && // 'O'
+        bytes[i + 11] === 0x46 && // 'F'
+        bytes[i + 12] === 0x49 && // 'I'
+        bytes[i + 13] === 0x4c && // 'L'
+        bytes[i + 14] === 0x45 && // 'E'
+        bytes[i + 15] === 0x00
+      ) {
+        const seq = bytes[i + 16];
+        const total = bytes[i + 17];
+        const data = bytes.subarray(i + 18, i + 2 + segLen);
+        chunks.push({ seq, total, data });
+      }
+      i += 1 + segLen;
+    } else if (bytes[i] === 0xff && bytes[i + 1] === 0xda) {
+      // Start of Scan: markers end
+      break;
+    }
+  }
+
+  if (chunks.length === 0) return null;
+  chunks.sort((a, b) => a.seq - b.seq);
+  let totalBytes = 0;
+  for (const c of chunks) totalBytes += c.data.length;
+  const fullIcc = new Uint8Array(totalBytes);
+  let curOffset = 0;
+  for (const c of chunks) {
+    fullIcc.set(c.data, curOffset);
+    curOffset += c.data.length;
+  }
+  return fullIcc.length >= 128 ? fullIcc : null;
 }
 
 function readTagValues(
@@ -189,6 +273,15 @@ function parseSingleIfd(
       continue;
     }
 
+    if (tag === 34675 && count >= 128) {
+      // ICC Profile tag
+      const dataOffset = count <= 4 ? valPos : view.getUint32(valPos, littleEndian);
+      if (dataOffset > 0 && dataOffset + count <= view.byteLength) {
+        summary.iccProfileBytes = new Uint8Array(view.buffer, view.byteOffset + dataOffset, count).slice();
+      }
+      continue;
+    }
+
     const vals = readTagValues(view, littleEndian, type, count, valPos);
     if (vals.length === 0) continue;
 
@@ -232,6 +325,9 @@ function parseSingleIfd(
       case 34665: // ExifIFD
         summary.exifIfdOffset = vals[0];
         break;
+      case 40961: // ColorSpace
+        summary.colorSpaceTag = vals[0];
+        break;
     }
   }
 
@@ -247,11 +343,12 @@ function parseExifSubIfd(
   exifOffset: number,
   littleEndian: boolean,
   exifOut: ExifMetadata
-) {
-  if (exifOffset <= 0 || exifOffset + 2 > view.byteLength) return;
+): { colorSpaceTag?: number } {
+  let colorSpaceTag: number | undefined;
+  if (exifOffset <= 0 || exifOffset + 2 > view.byteLength) return { colorSpaceTag };
   const numEntries = view.getUint16(exifOffset, littleEndian);
   if (numEntries <= 0 || numEntries > 512 || exifOffset + 2 + numEntries * 12 > view.byteLength) {
-    return;
+    return { colorSpaceTag };
   }
 
   for (let i = 0; i < numEntries; i++) {
@@ -298,8 +395,13 @@ function parseExifSubIfd(
     } else if (tag === 37386 && vals[0] > 0) {
       // FocalLength
       exifOut.focalLength = `${Math.round(vals[0] * 10) / 10}mm`;
+    } else if (tag === 40961) {
+      // ColorSpace: 1=sRGB, 2=Adobe RGB, 65535=Uncalibrated/Wide
+      colorSpaceTag = vals[0];
     }
   }
+
+  return { colorSpaceTag };
 }
 
 /**
@@ -730,6 +832,8 @@ export async function decodeImageFileLocal(
   let uncompressed16: { width: number; height: number; rgb16: Uint16Array } | null = null;
   let uncompressed8: { width: number; height: number; rgb8: Uint8Array } | null = null;
   let bestEmbeddedJpegBytes: Uint8Array | null = null;
+  let detectedIccBytes: Uint8Array | undefined = undefined;
+  let detectedColorSpace: ColorSpaceId = isRaw ? 'adobe-rgb' : 'srgb';
 
   // Parse TIFF / RW2 / DNG / RAW IFD tree if header is II/MM (magic 42 standard TIFF, 85 Panasonic RW2, 0x4F52 Olympus ORF)
   if (littleEndian !== null && (magic === 42 || magic === 85 || magic === 0x4f52 || magic === 0x5352)) {
@@ -746,6 +850,14 @@ export async function decodeImageFileLocal(
       if (!parsed) continue;
       const { summary, nextIfdOffset } = parsed;
 
+      if (summary.iccProfileBytes && !detectedIccBytes) {
+        detectedIccBytes = summary.iccProfileBytes;
+        detectedColorSpace = detectColorSpaceFromIcc(detectedIccBytes);
+      }
+      if (summary.colorSpaceTag === 2) {
+        detectedColorSpace = 'adobe-rgb';
+      }
+
       if (summary.make && (exif.make === 'Unknown' || exif.make === 'Camera')) {
         exif.make = summary.make;
       }
@@ -756,7 +868,10 @@ export async function decodeImageFileLocal(
         exif.dateTime = summary.dateTime;
       }
       if (summary.exifIfdOffset > 0) {
-        parseExifSubIfd(view, summary.exifIfdOffset, littleEndian, exif);
+        const subRes = parseExifSubIfd(view, summary.exifIfdOffset, littleEndian, exif);
+        if (subRes.colorSpaceTag === 2) {
+          detectedColorSpace = 'adobe-rgb';
+        }
       }
 
       // Check for Panasonic RW2 JpgFromRaw (Tag 0x002E)
@@ -867,6 +982,8 @@ export async function decodeImageFileLocal(
       isRaw,
       extension: ext.toUpperCase(),
       exposureScale,
+      detectedColorSpace,
+      rawIccProfileBytes: detectedIccBytes,
       exif,
     };
   }
@@ -890,6 +1007,8 @@ export async function decodeImageFileLocal(
       isRaw: false,
       extension: ext.toUpperCase(),
       exposureScale: 1.0,
+      detectedColorSpace,
+      rawIccProfileBytes: detectedIccBytes,
       exif,
     };
   }
@@ -898,6 +1017,16 @@ export async function decodeImageFileLocal(
   // Extract the camera's full-resolution embedded preview (which contains the exact camera ISP color profile & S-curve)
   if (!bestEmbeddedJpegBytes && isRaw) {
     bestEmbeddedJpegBytes = findLargestEmbeddedJpeg(bytes);
+  }
+
+  // Check for JPEG APP2 ICC profile in either embedded JPEG or standalone image
+  if (!detectedIccBytes) {
+    const targetJpg = bestEmbeddedJpegBytes || bytes;
+    const jpgIcc = extractJpegIccProfile(targetJpg);
+    if (jpgIcc) {
+      detectedIccBytes = jpgIcc;
+      detectedColorSpace = detectColorSpaceFromIcc(jpgIcc);
+    }
   }
 
   let decoded8: { width: number; height: number; rgb8: Uint8Array };
@@ -930,6 +1059,8 @@ export async function decodeImageFileLocal(
     isRaw,
     extension: ext.toUpperCase(),
     exposureScale: 1.0,
+    detectedColorSpace,
+    rawIccProfileBytes: detectedIccBytes,
     exif,
   };
 }

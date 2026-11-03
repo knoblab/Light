@@ -1,5 +1,6 @@
-import { SessionMetadata } from '../types/sensor';
+import { ColorSpaceId, SessionMetadata } from '../types/sensor';
 import { resizeRgb8Area } from './dustAlgorithms';
+import { buildIccProfileBytes, COLOR_SPACE_DEFS } from './colorSpaces';
 
 /**
  * Encodes an RGB8 buffer (W x H x 3) into a PNG or JPEG Blob via OffscreenCanvas.
@@ -162,10 +163,75 @@ function makeFloatTag(tag: number, values: number[]): TiffTagEntry {
   };
 }
 
+function makeUndefinedTag(tag: number, data: Uint8Array): TiffTagEntry {
+  return {
+    tag,
+    type: 7, // UNDEFINED
+    count: data.length,
+    writeData: (view, offset) => {
+      const u8 = new Uint8Array(view.buffer, view.byteOffset + offset, data.length);
+      u8.set(data);
+    },
+  };
+}
+
+/**
+ * Injects an ICC Profile into a JPEG Blob using the standard APP2 marker (\xFF\xE2 "ICC_PROFILE\0").
+ */
+export async function injectIccProfileToJpegBlob(jpegBlob: Blob, iccBytes: Uint8Array): Promise<Blob> {
+  const origBuf = await jpegBlob.arrayBuffer();
+  const origU8 = new Uint8Array(origBuf);
+
+  // JPEG starts with SOI (\xFF\xD8)
+  if (origU8.length < 4 || origU8[0] !== 0xff || origU8[1] !== 0xd8) {
+    return jpegBlob;
+  }
+
+  // Max payload per APP2 chunk is 65535 - 2 (length) - 14 ("ICC_PROFILE\0" + seq + total) = 65519
+  const MAX_CHUNK = 65519;
+  const totalChunks = Math.ceil(iccBytes.length / MAX_CHUNK);
+  const app2Segments: Uint8Array[] = [];
+
+  for (let seq = 1; seq <= totalChunks; seq++) {
+    const start = (seq - 1) * MAX_CHUNK;
+    const end = Math.min(iccBytes.length, seq * MAX_CHUNK);
+    const chunkData = iccBytes.subarray(start, end);
+    const segLen = 2 + 14 + chunkData.length;
+
+    const seg = new Uint8Array(2 + segLen);
+    seg[0] = 0xff;
+    seg[1] = 0xe2; // APP2
+    seg[2] = (segLen >> 8) & 0xff;
+    seg[3] = segLen & 0xff;
+
+    // "ICC_PROFILE\0"
+    const sig = [0x49, 0x43, 0x43, 0x5f, 0x50, 0x52, 0x4f, 0x46, 0x49, 0x4c, 0x45, 0x00];
+    for (let k = 0; k < 12; k++) seg[4 + k] = sig[k];
+    seg[16] = seq;
+    seg[17] = totalChunks;
+    seg.set(chunkData, 18);
+    app2Segments.push(seg);
+  }
+
+  // Combine: SOI (2 bytes) + APP2 segments + rest of JPEG (from offset 2)
+  const totalLength = 2 + app2Segments.reduce((sum, s) => sum + s.length, 0) + (origU8.length - 2);
+  const result = new Uint8Array(totalLength);
+  result.set(origU8.subarray(0, 2), 0);
+  let offset = 2;
+  for (const seg of app2Segments) {
+    result.set(seg, offset);
+    offset += seg.length;
+  }
+  result.set(origU8.subarray(2), offset);
+
+  return new Blob([result.buffer], { type: 'image/jpeg' });
+}
+
 function getTiffTypeByteSize(type: number): number {
   switch (type) {
     case 1:
     case 2:
+    case 7:
       return 1;
     case 3:
       return 2;
@@ -221,7 +287,7 @@ function writeIfdBlock(
 /**
  * Builds a standard Dual-IFD 16-bit Linear DNG 1.4 binary ArrayBuffer:
  *   - IFD0: High-resolution 8-bit RGB preview with 100% original camera color & contrast
- *     (for instant, color-accurate display in Samsung Gallery, Android, iOS, macOS, Windows)
+ *     paired with embedded Tag 34675 (ICCProfile) for wide gamut color spaces (Adobe RGB, P3, BT.2020)
  *   - SubIFD0: Full-resolution 16-bit LinearRaw RGB with D65 ColorMatrix1 + ProfileToneCurve
  *     (for Adobe Lightroom, Camera Raw, Darktable, and professional 16-bit workflows)
  */
@@ -230,7 +296,9 @@ export function writeLinearDngBuffer(
   healedLinear16: Uint16Array,
   fullW: number,
   fullH: number,
-  meta: SessionMetadata
+  meta: SessionMetadata,
+  targetColorSpace: ColorSpaceId = 'auto',
+  customIccProfile?: Uint8Array
 ): ArrayBuffer {
   const maxPrevDim = 2560;
   let prevW = fullW;
@@ -247,12 +315,19 @@ export function writeLinearDngBuffer(
   const modelStr = meta.exif?.model || 'Lumix Camera Sensor';
   const uniqueModel = `${makeStr} ${modelStr}`.trim();
 
-  // D65 CIE XYZ -> sRGB Linear ColorMatrix1
-  const colorMatrix1: Array<[number, number]> = [
+  const effectiveSpace: Exclude<ColorSpaceId, 'auto'> =
+    targetColorSpace === 'auto'
+      ? (meta.detectedColorSpace && meta.detectedColorSpace !== 'auto' ? meta.detectedColorSpace : 'adobe-rgb')
+      : targetColorSpace;
+
+  const colorMatrix1 = COLOR_SPACE_DEFS[effectiveSpace]?.dngColorMatrix1 || [
     [32405, 10000], [-15371, 10000], [-4985, 10000],
     [-9693, 10000], [18760, 10000],  [416, 10000],
     [556, 10000],   [-2040, 10000],  [10572, 10000],
   ];
+
+  const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
+  const profileName = COLOR_SPACE_DEFS[effectiveSpace]?.name || 'Adobe RGB (1998)';
 
   // Camera S-Curve ProfileToneCurve (Tag 50940 / 0xC6FC) so Lightroom/ACR renders deep blacks and rich contrast
   const profileToneCurveFloats = [
@@ -268,8 +343,8 @@ export function writeLinearDngBuffer(
   const prevByteCount = prevW * prevH * 3;
   const raw16ByteCount = fullW * fullH * 3 * 2;
 
-  // Reserve 4096 bytes for headers + IFD0 + SubIFD0 metadata before pixel strips
-  const headerReserve = 4096;
+  // Reserve 16384 bytes for headers + IFD0 + SubIFD0 + ICC profile metadata before pixel strips
+  const headerReserve = 16384;
   const prevStripOffset = headerReserve;
   const raw16StripOffset = prevStripOffset + prevByteCount + (prevByteCount % 2);
   const totalBufferSize = raw16StripOffset + raw16ByteCount;
@@ -285,7 +360,7 @@ export function writeLinearDngBuffer(
   view.setUint32(4, 8, true);
 
   // Placeholder SubIFD0 offset (will be computed after sizing IFD0)
-  const subIfdOffset = 1024;
+  const subIfdOffset = 4096;
 
   const ifd0Entries: TiffTagEntry[] = [
     makeLongTag(254, [1]), // NewSubfileType = 1 (Preview / Reduced-res)
@@ -305,14 +380,16 @@ export function writeLinearDngBuffer(
     makeRationalTag(283, [[72, 1]]),
     makeShortTag(284, [1]), // PlanarConfig = Contig
     makeShortTag(296, [2]), // ResolutionUnit = Inch
-    makeAsciiTag(305, 'SensorClean Pro 16-bit DNG Engine'),
+    makeAsciiTag(305, 'SensorClean Pro Wide-Gamut DNG Engine'),
     makeLongTag(330, [subIfdOffset]), // SubIFDs pointer -> SubIFD0
+    makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
     makeByteTag(50706, [1, 4, 0, 0]), // DNGVersion 1.4.0.0
     makeByteTag(50707, [1, 1, 0, 0]), // DNGBackwardVersion 1.1.0.0
     makeAsciiTag(50708, uniqueModel), // UniqueCameraModel
     makeSRationalTag(50721, colorMatrix1), // ColorMatrix1
     makeRationalTag(50728, [[10000, 10000], [10000, 10000], [10000, 10000]]), // AsShotNeutral
     makeShortTag(50740, [21]), // CalibrationIlluminant1 = D65
+    makeAsciiTag(50936, profileName), // ProfileName
     makeFloatTag(50940, profileToneCurveFloats), // ProfileToneCurve
   ];
 
@@ -342,7 +419,6 @@ export function writeLinearDngBuffer(
   u8.set(prevRgb8, prevStripOffset);
 
   // Write SubIFD0 16-bit Linear RGB pixels (Little-Endian uint16)
-  // On Little-Endian machines (all modern x86/ARM browsers), Uint16Array byte representation is already LE
   const dst16 = new Uint16Array(buffer, raw16StripOffset, healedLinear16.length);
   dst16.set(healedLinear16);
 
@@ -351,18 +427,28 @@ export function writeLinearDngBuffer(
 
 /**
  * Builds a standard 16-bit uncompressed RGB TIFF binary ArrayBuffer (.tiff)
- * preserving 100% of the camera's original color and tone curve at 16-bit precision.
+ * with Tag 34675 (ICCProfile) embedded for wide-gamut reproduction.
  */
 export function writeTiff16Buffer(
   healedRgb8: Uint8Array,
   healedLinear16: Uint16Array,
   fullW: number,
   fullH: number,
-  meta: SessionMetadata
+  meta: SessionMetadata,
+  targetColorSpace: ColorSpaceId = 'auto',
+  customIccProfile?: Uint8Array
 ): ArrayBuffer {
   const numSamples = fullW * fullH * 3;
   const raw16ByteCount = numSamples * 2;
-  const headerReserve = 2048;
+
+  const effectiveSpace: Exclude<ColorSpaceId, 'auto'> =
+    targetColorSpace === 'auto'
+      ? (meta.detectedColorSpace && meta.detectedColorSpace !== 'auto' ? meta.detectedColorSpace : 'adobe-rgb')
+      : targetColorSpace;
+
+  const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
+
+  const headerReserve = 8192;
   const stripOffset = headerReserve;
   const totalBufferSize = stripOffset + raw16ByteCount;
 
@@ -396,7 +482,8 @@ export function writeTiff16Buffer(
     makeRationalTag(283, [[72, 1]]),
     makeShortTag(284, [1]),
     makeShortTag(296, [2]),
-    makeAsciiTag(305, 'SensorClean Pro 16-bit TIFF Engine'),
+    makeAsciiTag(305, 'SensorClean Pro Wide-Gamut 16-bit TIFF Engine'),
+    makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
   ];
 
   writeIfdBlock(view, 8, entries, 0);

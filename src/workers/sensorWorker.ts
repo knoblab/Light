@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import {
+  ColorSpaceId,
   DetectedDustSpot,
   DetectionParams,
   DetectionResult,
@@ -20,9 +21,16 @@ import {
   buildZipArchiveBlob,
   encodeMaskU8ToBlob,
   encodeRgb8ToBlob,
+  injectIccProfileToJpegBlob,
   writeLinearDngBuffer,
   writeTiff16Buffer,
 } from '../engine/binaryExporters';
+import {
+  buildIccProfileBytes,
+  COLOR_SPACE_DEFS,
+  transformLinear16ColorSpace,
+  transformRgb8ColorSpace,
+} from '../engine/colorSpaces';
 
 interface WorkerSessionData {
   sessionId: string;
@@ -33,6 +41,7 @@ interface WorkerSessionData {
   detGray: Float32Array;
   healedRgb8?: Uint8Array;
   healedLinear16?: Uint16Array;
+  rawIccProfileBytes?: Uint8Array;
   lastDetection?: DetectionResult;
 }
 
@@ -84,6 +93,13 @@ async function processSingleIngestAndDetect(
       ? Math.round(Math.log2(Math.max(maxVal, 1) / Math.max(minVal, 1)) * 100) / 100
       : 14.0;
 
+  const colorSpaceName =
+    decoded.detectedColorSpace && decoded.detectedColorSpace !== 'auto'
+      ? COLOR_SPACE_DEFS[decoded.detectedColorSpace]?.name || 'Adobe RGB (1998)'
+      : decoded.isRaw
+      ? 'Original Camera Color & Tone Profile'
+      : 'Original sRGB 1:1';
+
   const meta: SessionMetadata = {
     originalFileName: fileName,
     extension: decoded.extension,
@@ -95,7 +111,9 @@ async function processSingleIngestAndDetect(
     workScale,
     exposureScale: decoded.exposureScale,
     bitDepth: '16-bit Linear + 1:1 Original Camera Profile',
-    colorSpace: decoded.isRaw ? 'Original Camera Color & Tone Profile' : 'Original sRGB 1:1',
+    colorSpace: colorSpaceName,
+    detectedColorSpace: decoded.detectedColorSpace,
+    hasEmbeddedIcc: Boolean(decoded.rawIccProfileBytes),
     cameraWb: [1.0, 1.0, 1.0, 1.0],
     colorMatrix: [],
     blackLevel: [0, 0, 0, 0],
@@ -129,6 +147,7 @@ async function processSingleIngestAndDetect(
     linear16: decoded.linear16,
     workRgb8,
     detGray,
+    rawIccProfileBytes: decoded.rawIccProfileBytes,
     lastDetection: detectionResult,
   });
 
@@ -154,36 +173,78 @@ async function renderExportBuffer(
   session: WorkerSessionData,
   format: 'dng' | 'tiff16' | 'png' | 'jpg',
   healedRgb8: Uint8Array,
-  healedLinear16: Uint16Array
+  healedLinear16: Uint16Array,
+  targetColorSpace: ColorSpaceId = 'auto'
 ): Promise<{ blob: Blob; ext: string; mimeType: string }> {
   const { fullWidth: w, fullHeight: h } = session.meta;
   const fmt = format.toLowerCase();
 
+  const sourceSpace: Exclude<ColorSpaceId, 'auto'> =
+    session.meta.detectedColorSpace && session.meta.detectedColorSpace !== 'auto'
+      ? session.meta.detectedColorSpace
+      : 'adobe-rgb';
+
+  const effectiveTargetSpace: Exclude<ColorSpaceId, 'auto'> =
+    targetColorSpace === 'auto' ? sourceSpace : targetColorSpace;
+
+  let exportRgb8 = healedRgb8;
+  let exportLinear16 = healedLinear16;
+
+  // Convert color space only if user explicitly selected a different target space
+  if (targetColorSpace !== 'auto' && targetColorSpace !== sourceSpace) {
+    exportRgb8 = new Uint8Array(healedRgb8.length);
+    transformRgb8ColorSpace(healedRgb8, exportRgb8, sourceSpace, effectiveTargetSpace);
+    exportLinear16 = new Uint16Array(healedLinear16.length);
+    transformLinear16ColorSpace(healedLinear16, exportLinear16, sourceSpace, effectiveTargetSpace);
+  }
+
+  const customIcc =
+    session.rawIccProfileBytes && (targetColorSpace === 'auto' || targetColorSpace === sourceSpace)
+      ? session.rawIccProfileBytes
+      : buildIccProfileBytes(effectiveTargetSpace);
+
   if (fmt === 'dng') {
-    const dngBuf = writeLinearDngBuffer(healedRgb8, healedLinear16, w, h, session.meta);
+    const dngBuf = writeLinearDngBuffer(
+      exportRgb8,
+      exportLinear16,
+      w,
+      h,
+      session.meta,
+      effectiveTargetSpace,
+      customIcc
+    );
     return {
       blob: new Blob([dngBuf], { type: 'image/x-adobe-dng' }),
       ext: 'dng',
       mimeType: 'image/x-adobe-dng',
     };
   } else if (fmt === 'tiff16') {
-    const tiffBuf = writeTiff16Buffer(healedRgb8, healedLinear16, w, h, session.meta);
+    const tiffBuf = writeTiff16Buffer(
+      exportRgb8,
+      exportLinear16,
+      w,
+      h,
+      session.meta,
+      effectiveTargetSpace,
+      customIcc
+    );
     return {
       blob: new Blob([tiffBuf], { type: 'image/tiff' }),
       ext: 'tiff',
       mimeType: 'image/tiff',
     };
   } else if (fmt === 'png') {
-    const pngBlob = await encodeRgb8ToBlob(healedRgb8, w, h, 'image/png');
+    const pngBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/png');
     return {
       blob: pngBlob,
       ext: 'png',
       mimeType: 'image/png',
     };
   } else {
-    const jpgBlob = await encodeRgb8ToBlob(healedRgb8, w, h, 'image/jpeg', 0.98);
+    const baseJpgBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/jpeg', 0.98);
+    const wideJpgBlob = await injectIccProfileToJpegBlob(baseJpgBlob, customIcc);
     return {
-      blob: jpgBlob,
+      blob: wideJpgBlob,
       ext: 'jpg',
       mimeType: 'image/jpeg',
     };
@@ -292,6 +353,7 @@ self.onmessage = async (event: MessageEvent) => {
       const {
         sessionId,
         format,
+        colorSpace = 'auto',
         spots,
         manualStrokes,
         inpaintRadius,
@@ -299,6 +361,7 @@ self.onmessage = async (event: MessageEvent) => {
       }: {
         sessionId: string;
         format: 'dng' | 'tiff16' | 'png' | 'jpg';
+        colorSpace?: ColorSpaceId;
         spots: DetectedDustSpot[];
         manualStrokes: ManualBrushStroke[];
         inpaintRadius: number;
@@ -328,7 +391,7 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedLinear16 = healedLinear16;
 
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
-        renderExportBuffer(session, format, healedRgb8, healedLinear16),
+        renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
         encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
       ]);
@@ -450,6 +513,7 @@ self.onmessage = async (event: MessageEvent) => {
       const {
         items,
         format,
+        colorSpace = 'auto',
       }: {
         items: Array<{
           sessionId: string;
@@ -458,6 +522,7 @@ self.onmessage = async (event: MessageEvent) => {
           params: DetectionParams;
         }>;
         format: 'dng' | 'tiff16' | 'png' | 'jpg';
+        colorSpace?: ColorSpaceId;
       } = payload;
 
       const zipEntries: Array<{ name: string; data: Uint8Array }> = [];
@@ -481,7 +546,13 @@ self.onmessage = async (event: MessageEvent) => {
           it.params?.preserveGrain ?? true
         );
 
-        const { blob, ext } = await renderExportBuffer(sess, format, healedRgb8, healedLinear16);
+        const { blob, ext } = await renderExportBuffer(
+          sess,
+          format,
+          healedRgb8,
+          healedLinear16,
+          colorSpace
+        );
         const arrBuf = await blob.arrayBuffer();
         const origBase = sess.meta.originalFileName.replace(/\.[^/.]+$/, '');
         const entryName = `${String(i + 1).padStart(2, '0')}_${origBase}_cleaned.${ext}`;

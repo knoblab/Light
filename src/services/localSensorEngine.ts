@@ -1,4 +1,5 @@
 import {
+  ColorSpaceId,
   DetectedDustSpot,
   DetectionParams,
   DetectionResult,
@@ -143,7 +144,8 @@ class LocalSensorEngineClient {
     spots: DetectedDustSpot[],
     manualStrokes: ManualBrushStroke[],
     inpaintRadius: number,
-    preserveGrain: boolean
+    preserveGrain: boolean,
+    colorSpace: ColorSpaceId = 'auto'
   ): Promise<{
     fileBlob: Blob;
     downloadName: string;
@@ -157,6 +159,7 @@ class LocalSensorEngineClient {
       manualStrokes,
       inpaintRadius,
       preserveGrain,
+      colorSpace,
     });
 
     return {
@@ -236,9 +239,10 @@ class LocalSensorEngineClient {
       manualStrokes: ManualBrushStroke[];
       params: DetectionParams;
     }>,
-    format: 'dng' | 'tiff16' | 'png' | 'jpg'
+    format: 'dng' | 'tiff16' | 'png' | 'jpg',
+    colorSpace: ColorSpaceId = 'auto'
   ): Promise<{ zipBlob: Blob; downloadName: string }> {
-    return await this.callWorker('multi_export_zip', { items, format });
+    return await this.callWorker('multi_export_zip', { items, format, colorSpace });
   }
 
   triggerBrowserDownload(blob: Blob, downloadName: string) {

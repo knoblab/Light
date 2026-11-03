@@ -1,5 +1,15 @@
 export type DetectionMethod = 'dual' | 'sharp' | 'bokeh' | 'multiscale' | 'hybrid' | 'blackhat' | 'dog';
 
+export type ColorSpaceId = 'auto' | 'adobe-rgb' | 'display-p3' | 'bt2020' | 'prophoto-rgb' | 'srgb';
+
+export interface ColorSpaceInfo {
+  id: ColorSpaceId;
+  label: string;
+  shortLabel: string;
+  description: string;
+  gamutCoverage: string;
+}
+
 export type OverlayMode = 'red-circle' | 'bw-edge';
 
 export type InteractionTool = 'inspect' | 'deselect-brush' | 'brush-add' | 'brush-erase';
@@ -76,6 +86,8 @@ export interface SessionMetadata {
   exposureScale: number;
   bitDepth: string;
   colorSpace: string;
+  detectedColorSpace?: ColorSpaceId;
+  hasEmbeddedIcc?: boolean;
   cameraWb: number[];
   colorMatrix: number[][];
   blackLevel: number[];

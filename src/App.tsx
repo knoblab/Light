@@ -21,8 +21,10 @@ import {
   PanelRightOpen,
   X,
   Plus,
+  Palette,
 } from 'lucide-react';
 import {
+  ColorSpaceId,
   DetectedDustSpot,
   DetectionMethod,
   DetectionParams,
@@ -38,6 +40,7 @@ import {
   StudioMode,
   ViewComparisonMode,
 } from './types/sensor';
+import { COLOR_SPACE_OPTIONS } from './engine/colorSpaces';
 import { DarkroomCanvas } from './components/DarkroomCanvas';
 import { localSensorEngine } from './services/localSensorEngine';
 
@@ -126,12 +129,15 @@ export function App() {
   const [openAccordions, setOpenAccordions] = useState<{
     detect: boolean;
     heal: boolean;
+    colorSpace: boolean;
     spots: boolean;
   }>({
     detect: true,
     heal: true,
+    colorSpace: true,
     spots: true,
   });
+  const [selectedColorSpace, setSelectedColorSpace] = useState<ColorSpaceId>('auto');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false);
 
   // Mobile Drawer state
@@ -521,7 +527,8 @@ export function App() {
 
       const { zipBlob, downloadName } = await localSensorEngine.multiExportZip(
         exportItems,
-        format
+        format,
+        selectedColorSpace
       );
       localSensorEngine.triggerBrowserDownload(zipBlob, downloadName);
     } catch (err: any) {
@@ -631,7 +638,8 @@ export function App() {
         spots,
         manualStrokes,
         params.inpaintRadius,
-        params.preserveGrain
+        params.preserveGrain,
+        selectedColorSpace
       );
 
       if (res.inpaintResult) {
@@ -795,6 +803,29 @@ export function App() {
               </>
             )}
             <span>·</span>
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-[#242424] text-[#5AC8FA] border border-[#383838]"
+              title={`원본 감지 색공간: ${meta.detectedColorSpace || 'sRGB'} ${meta.hasEmbeddedIcc ? '(ICC 프로파일 내장)' : ''}`}
+            >
+              <Palette className="w-2.5 h-2.5" />
+              <span>
+                {meta.detectedColorSpace === 'adobe-rgb'
+                  ? 'Adobe RGB'
+                  : meta.detectedColorSpace === 'display-p3'
+                  ? 'Display P3'
+                  : meta.detectedColorSpace === 'bt2020'
+                  ? 'BT.2020'
+                  : meta.detectedColorSpace === 'prophoto-rgb'
+                  ? 'ProPhoto RGB'
+                  : meta.detectedColorSpace === 'srgb'
+                  ? 'sRGB'
+                  : '광색역 감지'}
+              </span>
+              {meta.hasEmbeddedIcc && (
+                <span className="text-[9px] text-[#A1A1AA] uppercase">ICC</span>
+              )}
+            </span>
+            <span>·</span>
             <span className="text-[#D4D4D4]">
               스팟 {enabledSpotsCount}/{spots.length}
             </span>
@@ -807,6 +838,14 @@ export function App() {
             <span className="truncate max-w-[110px] text-[#E5E5E5]">
               {meta.originalFileName}
             </span>
+            {meta.detectedColorSpace && meta.detectedColorSpace !== 'srgb' && (
+              <>
+                <span>·</span>
+                <span className="text-[10px] text-[#5AC8FA]">
+                  {meta.detectedColorSpace === 'adobe-rgb' ? 'AdobeRGB' : 'P3'}
+                </span>
+              </>
+            )}
             <span>·</span>
             <span>{enabledSpotsCount}</span>
           </div>
@@ -863,7 +902,16 @@ export function App() {
             </button>
 
             {isExportMenuOpen && (
-              <div className="absolute right-0 mt-1.5 w-44 rounded-md bg-[#222222] border border-[#383838] shadow-2xl py-1 z-50 text-xs">
+              <div className="absolute right-0 mt-1.5 w-48 rounded-md bg-[#222222] border border-[#383838] shadow-2xl py-1 z-50 text-xs">
+                <div className="px-3 py-1.5 border-b border-[#333333] flex items-center justify-between text-[11px] text-[#A0A0A0]">
+                  <span className="flex items-center gap-1">
+                    <Palette className="w-3 h-3 text-[#5AC8FA]" />
+                    <span>색공간</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-[#5AC8FA] font-medium">
+                    {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('dng')}
@@ -1250,6 +1298,110 @@ export function App() {
                       <span>복원 되돌리기 (원본 작업 상태로)</span>
                     </button>
                   )}
+                </div>
+              )}
+            </div>
+
+            {/* Accordion: 색공간 및 ICC 프로파일 (Color Space & Gamut) */}
+            <div className="border-b border-[#323232]">
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenAccordions((p) => ({ ...p, colorSpace: !p.colorSpace }))
+                }
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#252525] text-xs font-semibold text-[#E5E5E5] cursor-pointer text-left"
+              >
+                <div className="flex items-center gap-1.5">
+                  {openAccordions.colorSpace ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-[#8E8E8E]" />
+                  )}
+                  <Palette className="w-3.5 h-3.5 text-[#5AC8FA]" />
+                  <span>색공간 및 ICC 프로파일</span>
+                </div>
+                <span className="font-mono text-[10px] text-[#5AC8FA] bg-[#222222] px-1.5 py-0.5 rounded border border-[#333333]">
+                  {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
+                </span>
+              </button>
+
+              {openAccordions.colorSpace && (
+                <div className="px-3.5 pb-3 space-y-2.5">
+                  {/* Detected color space readout */}
+                  {meta && (
+                    <div className="p-2 rounded bg-[#161616] border border-[#2B2B2B] text-[11px]">
+                      <div className="flex items-center justify-between text-[#8E8E8E] mb-0.5">
+                        <span>원본 감지 색역</span>
+                        <span className="font-mono text-[#5AC8FA] font-medium">
+                          {meta.detectedColorSpace === 'adobe-rgb'
+                            ? 'Adobe RGB (1998)'
+                            : meta.detectedColorSpace === 'display-p3'
+                            ? 'Display P3'
+                            : meta.detectedColorSpace === 'bt2020'
+                            ? 'ITU-R BT.2020'
+                            : meta.detectedColorSpace === 'prophoto-rgb'
+                            ? 'ProPhoto RGB'
+                            : meta.detectedColorSpace === 'srgb'
+                            ? 'sRGB'
+                            : '자동 감지'}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-[#A0A0A0] flex items-center justify-between">
+                        <span>프로파일 출처</span>
+                        <span className="font-mono text-[#D4D4D4]">
+                          {meta.hasEmbeddedIcc
+                            ? '내장 ICC Profile (Tag 34675 / APP2)'
+                            : 'EXIF ColorSpace 메타데이터'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Target Color Space Selector */}
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] text-[#B8B8B8] font-medium flex items-center justify-between">
+                      <span>내보내기 대상 색공간</span>
+                      <span className="text-[10px] text-[#8E8E8E]">16비트 리니어 매핑</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      {COLOR_SPACE_OPTIONS.map((opt) => {
+                        const isSelected = selectedColorSpace === opt.id;
+                        return (
+                          <div
+                            key={opt.id}
+                            onClick={() => setSelectedColorSpace(opt.id)}
+                            className={`p-2 rounded border cursor-pointer transition-colors ${
+                              isSelected
+                                ? 'bg-[#1C2638] border-[#0A84FF] text-white'
+                                : 'bg-[#181818] border-[#2C2C2C] text-[#C4C4C4] hover:bg-[#202020] hover:border-[#383838]'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-[11px] font-semibold flex items-center gap-1.5">
+                                <span
+                                  className={`w-2 h-2 rounded-full ${
+                                    isSelected ? 'bg-[#0A84FF]' : 'bg-[#404040]'
+                                  }`}
+                                />
+                                {opt.label}
+                              </span>
+                              <span className="font-mono text-[9px] text-[#8E8E8E]">
+                                {opt.gamutCoverage}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-[#8E8E8E] leading-tight pl-3.5">
+                              {opt.description}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <p className="text-[10px] text-[#737373] leading-relaxed bg-[#141414] p-2 rounded border border-[#262626]">
+                    DNG, 16-bit TIFF, JPG 내보내기 시 위 규격의 공식 ICC v2.4 프로파일 및 DNG ColorMatrix 태그가 원본 파일에 함께 임베딩되어 모바일 갤러리 및 모니터에서 광색역을 왜곡 없이 정확하게 표시합니다.
+                  </p>
                 </div>
               )}
             </div>
@@ -1698,7 +1850,36 @@ export function App() {
 
           {/* Mobile Tab 5: Export */}
           {mobileTab === 'export' && (
-            <div className="space-y-2">
+            <div className="space-y-2.5">
+              {/* Mobile Color Space Selector */}
+              <div className="pb-2 border-b border-[#323232]">
+                <div className="flex items-center justify-between text-[11px] mb-1.5">
+                  <span className="flex items-center gap-1 text-[#B8B8B8] font-medium">
+                    <Palette className="w-3 h-3 text-[#5AC8FA]" />
+                    <span>내보내기 색공간 (광색역)</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-[#5AC8FA]">
+                    {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel}
+                  </span>
+                </div>
+                <div className="flex gap-1 overflow-x-auto pb-1 no-scrollbar">
+                  {COLOR_SPACE_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setSelectedColorSpace(opt.id)}
+                      className={`px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
+                        selectedColorSpace === opt.id
+                          ? 'bg-[#0A84FF] text-white'
+                          : 'bg-[#262626] text-[#A0A0A0] hover:text-white'
+                      }`}
+                    >
+                      {opt.shortLabel}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-2">
                 {(
                   [

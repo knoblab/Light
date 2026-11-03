@@ -1,6 +1,6 @@
 {
-  "summary": "Updated implementation plan for Cloudflare Pages migration AND exact camera color/contrast matching (CDF Tone-Curve LUT calibration from embedded RAW JPEG + 1:1 outside-mask pixel preservation).",
-  "updatedAt": "2026-11-03T12:08:40.707939905Z",
+  "summary": "광색역 색공간(Adobe RGB 1998, DCI-P3 / Display P3, BT.2020, ProPhoto RGB) 자동 감지 및 수동 선택 지원과 DNG/TIFF/PNG/JPG 내보내기 시 ICC 프로파일 및 DNG 광색역 행렬 내장 구현 계획입니다.",
+  "updatedAt": "2026-11-03T12:25:20.279009741Z",
   "requestFeedback": true,
   "userFacing": true
 }
