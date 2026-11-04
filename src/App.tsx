@@ -720,11 +720,11 @@ export function App() {
 
       {/* Top Header Bar */}
       <header className="h-11 px-3 bg-[#3A3A3D] border-b border-[#535356] flex items-center justify-between gap-4 shrink-0 z-30">
-        {/* Left: Brand + Mode Switch + Import */}
+        {/* Left: Brand + Mode Switch + Open File */}
         <div className="flex items-center gap-2.5 shrink-0">
           <div className="flex items-center gap-1.5">
             <img src="/favicon.svg" alt="SensorClean" className="w-4 h-4 rounded-xs" />
-            <span className="text-xs font-semibold tracking-tight text-white whitespace-nowrap">
+            <span className="text-xs font-semibold tracking-tight text-[#F7F6F2] whitespace-nowrap">
               SensorClean
             </span>
           </div>
@@ -735,7 +735,7 @@ export function App() {
               onClick={() => setStudioMode('single')}
               className={`px-2 py-0.5 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
                 studioMode === 'single'
-                  ? 'bg-[#556042] text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
                   : 'text-[#888783] hover:text-[#C2C1BB]'
               }`}
             >
@@ -751,13 +751,13 @@ export function App() {
               }}
               className={`flex items-center gap-1 px-2 py-0.5 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
                 studioMode === 'sequence'
-                  ? 'bg-[#556042] text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
                   : 'text-[#888783] hover:text-[#C2C1BB]'
               }`}
             >
               <span>연속</span>
               {sequenceItems.length > 0 && (
-                <span className="text-[10px] opacity-90">
+                <span className="text-[10px] tabular-nums opacity-90">
                   {sequenceItems.length}
                 </span>
               )}
@@ -775,47 +775,11 @@ export function App() {
             className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] text-[#E7E6E1] text-[11px] font-medium border border-[#535356] transition-colors cursor-pointer whitespace-nowrap"
           >
             <Upload className="w-3 h-3 text-[#C2C1BB]" />
-            <span className="hidden sm:inline">1. 불러오기</span>
+            <span className="hidden sm:inline">사진 열기</span>
           </button>
-
-          {sessionId && (
-            <button
-              type="button"
-              onClick={() => handleRedetect()}
-              disabled={isProcessing}
-              className="hidden md:flex items-center gap-1 px-2.5 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0"
-              title="먼지 분석 실행"
-            >
-              <Search className="w-3 h-3" />
-              <span>2. 먼지 분석</span>
-            </button>
-          )}
-
-          {sessionId && (
-            <div className="flex items-center gap-0.5 ml-0.5 shrink-0">
-              <button
-                type="button"
-                onClick={handleUndo}
-                disabled={undoStack.length === 0 || isProcessing}
-                title="되돌리기 (Ctrl+Z)"
-                className="p-1.5 rounded text-[#C2C1BB] hover:text-white hover:bg-[#535356] disabled:opacity-30 transition-colors cursor-pointer"
-              >
-                <Undo2 className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleRedo}
-                disabled={redoStack.length === 0 || isProcessing}
-                title="다시 실행 (Ctrl+Shift+Z)"
-                className="p-1.5 rounded text-[#C2C1BB] hover:text-white hover:bg-[#535356] disabled:opacity-30 transition-colors cursor-pointer"
-              >
-                <Redo2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          )}
         </div>
 
-        {/* Center: Metadata Readout */}
+        {/* Center: Metadata Readout (Clean Unboxed Typography) */}
         {meta && (
           <div className="hidden lg:flex items-center gap-2 text-[11px] text-[#C2C1BB] truncate">
             <span className="text-[#E7E6E1] font-medium truncate max-w-[170px]">
@@ -830,54 +794,49 @@ export function App() {
               </>
             )}
             <span>·</span>
-            <span>
+            <span className="tabular-nums">
               {meta.fullWidth}×{meta.fullHeight}
             </span>
             {meta.exif.fNumber && (
               <>
                 <span>·</span>
-                <span>f/{meta.exif.fNumber}</span>
+                <span className="tabular-nums">f/{meta.exif.fNumber}</span>
               </>
             )}
             {meta.exif.exposureTime && (
               <>
                 <span>·</span>
-                <span>{meta.exif.exposureTime}</span>
+                <span className="tabular-nums">{meta.exif.exposureTime}</span>
               </>
             )}
             {meta.exif.iso && (
               <>
                 <span>·</span>
-                <span>ISO {meta.exif.iso}</span>
+                <span className="tabular-nums">ISO {meta.exif.iso}</span>
               </>
             )}
             {meta.exif.focalLength && (
               <>
                 <span>·</span>
-                <span>{meta.exif.focalLength}</span>
+                <span className="tabular-nums">{meta.exif.focalLength}</span>
               </>
             )}
             <span>·</span>
-            <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-[#2B2B2E] text-[#E7E6E1] border border-[#535356]"
-              title={`원본 감지 색공간: ${meta.detectedColorSpace || 'sRGB'}`}
-            >
-              <span>
-                {meta.detectedColorSpace === 'adobe-rgb'
-                  ? 'Adobe RGB'
-                  : meta.detectedColorSpace === 'display-p3'
-                  ? 'Display P3'
-                  : meta.detectedColorSpace === 'bt2020'
-                  ? 'BT.2020'
-                  : meta.detectedColorSpace === 'prophoto-rgb'
-                  ? 'ProPhoto RGB'
-                  : meta.detectedColorSpace === 'srgb'
-                  ? 'sRGB'
-                  : '광색역 감지'}
-              </span>
+            <span title={`원본 감지 색역: ${meta.detectedColorSpace || 'sRGB'}`}>
+              {meta.detectedColorSpace === 'adobe-rgb'
+                ? 'Adobe RGB'
+                : meta.detectedColorSpace === 'display-p3'
+                ? 'Display P3'
+                : meta.detectedColorSpace === 'bt2020'
+                ? 'BT.2020'
+                : meta.detectedColorSpace === 'prophoto-rgb'
+                ? 'ProPhoto RGB'
+                : meta.detectedColorSpace === 'srgb'
+                ? 'sRGB'
+                : '광색역'}
             </span>
             <span>·</span>
-            <span className="text-[#E7E6E1]">
+            <span className="text-[#E7E6E1] tabular-nums">
               스팟 {enabledSpotsCount}/{spots.length}
             </span>
           </div>
@@ -898,57 +857,22 @@ export function App() {
               </>
             )}
             <span>·</span>
-            <span>{enabledSpotsCount}</span>
+            <span className="tabular-nums">{enabledSpotsCount}</span>
           </div>
         )}
 
-        {/* Right: Heal & Export Actions */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          {studioMode === 'sequence' && sequenceItems.length > 1 && (
-            <button
-              type="button"
-              onClick={handleApplyBatchInpainting}
-              disabled={!sessionId || isProcessing}
-              className="hidden sm:flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-[11px] font-medium cursor-pointer whitespace-nowrap disabled:opacity-40"
-            >
-              <Check className="w-3 h-3 text-[#556042]" />
-              <span>전체 적용</span>
-            </button>
-          )}
-
-          {(inpaintResult || urls?.previewInpainted) && (
-            <button
-              type="button"
-              onClick={handleRevertInpainting}
-              disabled={isProcessing}
-              title="적용된 먼지 복원을 취소하고 작업 화면으로 되돌리기"
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#C2C1BB] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
-            >
-              <RotateCcw className="w-3 h-3 text-[#C2C1BB]" />
-              <span className="hidden sm:inline">복원 되돌리기</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={handleApplyInpainting}
-            disabled={!sessionId || isProcessing}
-            className="flex items-center gap-1 px-3 py-1 rounded bg-[#556042] hover:bg-[#687652] text-white text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
-          >
-            <Check className="w-3 h-3" />
-            <span>3. 적용</span>
-          </button>
-
+        {/* Right: Export & Inspector Toggle */}
+        <div className="flex items-center gap-2 shrink-0">
           {/* Desktop Export Dropdown */}
           <div ref={exportMenuRef} className="relative hidden md:block">
             <button
               type="button"
               onClick={() => setIsExportMenuOpen((v) => !v)}
               disabled={!sessionId || isProcessing}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
+              className="flex items-center gap-1.5 px-3 py-1 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-40"
             >
-              <Download className="w-3 h-3" />
-              <span>4. 내보내기</span>
+              <Download className="w-3.5 h-3.5 text-[#C2C1BB]" />
+              <span>내보내기</span>
               <ChevronDown className="w-3 h-3 text-[#888783]" />
             </button>
 
@@ -958,12 +882,12 @@ export function App() {
                   <div className="flex items-center justify-between">
                     <span>출력 상태</span>
                     <span className="text-[10px] text-[#E7E6E1] font-semibold">
-                      {inpaintResult ? '적용된 버전' : '원본 버전 (미적용)'}
+                      {inpaintResult ? '복원 적용본' : '원본 (미적용)'}
                     </span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span>출력 해상도</span>
-                    <span className="text-[10px] text-[#E7E6E1]">
+                    <span className="text-[10px] text-[#E7E6E1] tabular-nums">
                       {meta ? `${meta.fullWidth}×${meta.fullHeight} (1:1 원본)` : '1:1 원본'}
                     </span>
                   </div>
@@ -977,34 +901,34 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => handleExportFormat('dng')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>DNG</span>
-                  <span className="text-[10px] opacity-75">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('tiff16')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>TIFF</span>
-                  <span className="text-[10px] opacity-75">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">16-bit · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('png')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>PNG</span>
-                  <span className="text-[10px] opacity-75">무손실 · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">무손실 · 1:1 원본</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleExportFormat('jpg')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-white flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>JPG</span>
-                  <span className="text-[10px] opacity-75">98% · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">98% · 1:1 원본</span>
                 </button>
 
                 {studioMode === 'sequence' && sequenceItems.length > 0 && (
@@ -1019,7 +943,7 @@ export function App() {
                           key={fmt}
                           type="button"
                           onClick={() => handleBatchExportZip(fmt)}
-                          className="px-2 py-1 rounded bg-[#2B2B2E] hover:bg-[#556042] hover:text-white text-[10px] uppercase text-center cursor-pointer border border-[#535356]"
+                          className="px-2 py-1 rounded bg-[#2B2B2E] hover:bg-[#556042] hover:text-[#F7F6F2] text-[10px] uppercase text-center cursor-pointer border border-[#535356]"
                         >
                           {fmt === 'tiff16' ? 'TIFF' : fmt}
                         </button>
@@ -1030,6 +954,20 @@ export function App() {
               </div>
             )}
           </div>
+
+          {/* Desktop Right Inspector Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsRightDockOpen((v) => !v)}
+            title={isRightDockOpen ? '우측 패널 접기' : '우측 패널 펼치기'}
+            className="hidden md:flex p-1.5 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#C2C1BB] hover:text-[#F7F6F2] transition-colors cursor-pointer"
+          >
+            {isRightDockOpen ? (
+              <PanelRightClose className="w-4 h-4" />
+            ) : (
+              <PanelRightOpen className="w-4 h-4" />
+            )}
+          </button>
         </div>
       </header>
 
@@ -1091,6 +1029,8 @@ export function App() {
             onBatchDeselectSpots={handleBatchDeselectSpots}
             onUndo={handleUndo}
             onRedo={handleRedo}
+            canUndo={undoStack.length > 0 && !isProcessing}
+            canRedo={redoStack.length > 0 && !isProcessing}
             filterMode={studioMode === 'sequence' ? filterMode : undefined}
             onChangeFilterMode={studioMode === 'sequence' ? setFilterMode : undefined}
             isSequenceMode={studioMode === 'sequence'}
@@ -1102,7 +1042,7 @@ export function App() {
               <button
                 type="button"
                 onClick={() => multiFileInputRef.current?.click()}
-                className="h-12 md:h-14 px-3 rounded border border-dashed border-[#535356] hover:border-[#556042] text-[#888783] hover:text-white flex flex-col items-center justify-center gap-0.5 text-[10px] shrink-0 cursor-pointer"
+                className="h-12 md:h-14 px-3 rounded border border-dashed border-[#535356] hover:border-[#556042] text-[#888783] hover:text-[#F7F6F2] flex flex-col items-center justify-center gap-0.5 text-[10px] shrink-0 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>추가</span>
@@ -1130,14 +1070,14 @@ export function App() {
                     />
                     <div className="absolute inset-x-0 bottom-0 bg-[#2B2B2E]/80 px-1 py-0.5 flex items-center justify-between text-[9px]">
                       <span className="text-[#C2C1BB]">#{idx + 1}</span>
-                      <span className="text-[#E7E6E1]">{activeCount}</span>
+                      <span className="text-[#E7E6E1] tabular-nums">{activeCount}</span>
                     </div>
                   </button>
                 );
               })}
 
               {multiReport && (
-                <div className="ml-auto pl-2 text-[11px] text-[#888783] whitespace-nowrap hidden sm:block">
+                <div className="ml-auto pl-2 text-[11px] text-[#888783] tabular-nums whitespace-nowrap hidden sm:block">
                   공통 먼지 {multiReport.multiConfirmedClusters}개
                 </div>
               )}
@@ -1147,93 +1087,82 @@ export function App() {
 
         {/* Desktop Right Collapsible Inspector Panel */}
         {isRightDockOpen && (
-          <aside className="hidden md:flex w-[272px] bg-[#3A3A3D] border-l border-[#535356] flex-col overflow-y-auto shrink-0">
-            {/* Contextual Brush Bar */}
-            {(interactionTool === 'deselect-brush' ||
-              interactionTool === 'brush-add' ||
-              interactionTool === 'brush-erase') && (
-              <div className="px-3.5 py-2.5 bg-[#2B2B2E] border-b border-[#535356]">
-                <div className="flex items-center justify-between text-[11px] mb-1">
-                  <span className="font-medium text-white">
-                    {interactionTool === 'deselect-brush'
-                      ? '지우개 브러시 반경'
-                      : interactionTool === 'brush-add'
-                      ? '복원 브러시 반경'
-                      : '마스크 지우개 반경'}
-                  </span>
-                  <span className="text-[#556042] font-semibold">{brushRadius}px</span>
-                </div>
-                <input
-                  type="range"
-                  min={4}
-                  max={120}
-                  value={brushRadius}
-                  onChange={(e) => setBrushRadius(Number(e.target.value))}
-                  className="lr-slider"
-                />
-                <div className="mt-2 flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={handleUndo}
-                    disabled={undoStack.length === 0 || isProcessing}
-                    className="flex-1 py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] disabled:opacity-35 text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <Undo2 className="w-3 h-3" />
-                    <span>되돌리기</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleRedo}
-                    disabled={redoStack.length === 0 || isProcessing}
-                    className="flex-1 py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] disabled:opacity-35 text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1 cursor-pointer"
-                  >
-                    <Redo2 className="w-3 h-3" />
-                    <span>다시 실행</span>
-                  </button>
-                </div>
-                {manualStrokes.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      pushHistorySnapshot();
-                      setManualStrokes([]);
-                    }}
-                    className="mt-1.5 w-full py-1 rounded bg-[#3A3A3D] hover:bg-[#535356] text-[11px] text-[#C2C1BB] cursor-pointer"
-                  >
-                    수동 브러시 초기화 ({manualStrokes.length})
-                  </button>
-                )}
+          <aside className="hidden md:flex w-[280px] bg-[#3A3A3D] border-l border-[#535356] flex-col overflow-y-auto shrink-0 select-none">
+            {/* Sticky Action Bar: Consolidated Primary Workflow */}
+            <div className="p-3 bg-[#3A3A3D] border-b border-[#535356] space-y-2 shrink-0">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRedetect()}
+                  disabled={!sessionId || isProcessing}
+                  title="센서 먼지 탐지 분석 실행"
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded bg-[#556042] hover:bg-[#687652] text-[#F7F6F2] text-xs font-semibold shadow-xs transition-colors cursor-pointer disabled:opacity-40"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                  <span>먼지 분석</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleApplyInpainting}
+                  disabled={!sessionId || isProcessing || spots.length === 0}
+                  title="선택된 먼지 스팟 복원 실행"
+                  className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#E7E6E1] text-xs font-semibold shadow-xs transition-colors cursor-pointer disabled:opacity-40"
+                >
+                  <Check className="w-3.5 h-3.5 text-[#556042]" />
+                  <span>복원 적용</span>
+                </button>
               </div>
-            )}
+
+              {/* Secondary Workflow Actions (Sequence batch or Revert) */}
+              {((studioMode === 'sequence' && sequenceItems.length > 1) || (inpaintResult || urls?.previewInpainted)) && (
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  {studioMode === 'sequence' && sequenceItems.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={handleApplyBatchInpainting}
+                      disabled={!sessionId || isProcessing}
+                      className="flex-1 py-1.5 px-2 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[11px] text-[#C2C1BB] font-medium transition-colors cursor-pointer disabled:opacity-40 text-center"
+                    >
+                      연속 {sequenceItems.length}장 일괄 적용
+                    </button>
+                  )}
+                  {(inpaintResult || urls?.previewInpainted) && (
+                    <button
+                      type="button"
+                      onClick={handleRevertInpainting}
+                      disabled={isProcessing}
+                      title="적용된 복원을 취소하고 작업 상태로 복귀"
+                      className="flex-1 py-1.5 px-2 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[11px] text-[#C2C1BB] font-medium transition-colors cursor-pointer disabled:opacity-40 flex items-center justify-center gap-1"
+                    >
+                      <RotateCcw className="w-3 h-3 text-[#888783]" />
+                      <span>복원 되돌리기</span>
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Accordion 1: 먼지 탐지 (Detection) */}
             <div className="border-b border-[#535356]">
-              <div className="flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E]">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setOpenAccordions((p) => ({ ...p, detect: !p.detect }))
-                  }
-                  className="flex items-center gap-1.5 text-xs font-semibold text-[#E7E6E1] cursor-pointer flex-1 text-left"
-                >
+              <button
+                type="button"
+                onClick={() =>
+                  setOpenAccordions((p) => ({ ...p, detect: !p.detect }))
+                }
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
+              >
+                <div className="flex items-center gap-1.5">
                   {openAccordions.detect ? (
                     <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
                   ) : (
                     <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
                   )}
-                  <span>먼지 탐지</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleRedetect()}
-                  disabled={!sessionId || isProcessing}
-                  title="분석 및 탐지"
-                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-[#556042] hover:bg-[#687652] text-[11px] text-white cursor-pointer disabled:opacity-40"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>분석</span>
-                </button>
-              </div>
+                  <span>먼지 탐지 설정</span>
+                </div>
+                <span className="text-[11px] font-normal text-[#888783]">
+                  {params.method === 'dual' ? '듀얼' : params.method === 'sharp' ? '미세' : '보케'}
+                </span>
+              </button>
 
               {openAccordions.detect && (
                 <div className="px-3.5 pb-3 space-y-1">
@@ -1252,7 +1181,7 @@ export function App() {
                         onClick={() => handleRedetect({ method: m.id })}
                         className={`py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer ${
                           params.method === m.id
-                            ? 'bg-[#556042] text-white'
+                            ? 'bg-[#556042] text-[#F7F6F2]'
                             : 'text-[#888783] hover:text-[#C2C1BB]'
                         }`}
                       >
@@ -1309,14 +1238,19 @@ export function App() {
               <button
                 type="button"
                 onClick={() => setOpenAccordions((p) => ({ ...p, heal: !p.heal }))}
-                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
-                {openAccordions.heal ? (
-                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
-                ) : (
-                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
-                )}
-                <span>복원 설정</span>
+                <div className="flex items-center gap-1.5">
+                  {openAccordions.heal ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                  )}
+                  <span>복원 파라미터</span>
+                </div>
+                <span className="text-[11px] font-normal text-[#888783] tabular-nums">
+                  {params.inpaintRadius}px
+                </span>
               </button>
 
               {openAccordions.heal && (
@@ -1350,17 +1284,6 @@ export function App() {
                       />
                     </button>
                   </div>
-                  {(inpaintResult || urls?.previewInpainted) && (
-                    <button
-                      type="button"
-                      onClick={handleRevertInpainting}
-                      disabled={isProcessing}
-                      className="w-full mt-1 py-1.5 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[11px] text-[#E7E6E1] flex items-center justify-center gap-1.5 cursor-pointer"
-                    >
-                      <RotateCcw className="w-3 h-3 text-[#C2C1BB]" />
-                      <span>복원 되돌리기 (원본 작업 상태로)</span>
-                    </button>
-                  )}
                 </div>
               )}
             </div>
@@ -1372,22 +1295,27 @@ export function App() {
                 onClick={() =>
                   setOpenAccordions((p) => ({ ...p, colorSpace: !p.colorSpace }))
                 }
-                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
-                {openAccordions.colorSpace ? (
-                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
-                ) : (
-                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
-                )}
-                <span>색공간 및 ICC 프로파일</span>
+                <div className="flex items-center gap-1.5">
+                  {openAccordions.colorSpace ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                  )}
+                  <span>색공간 설정</span>
+                </div>
+                <span className="text-[11px] font-normal text-[#888783]">
+                  {COLOR_SPACE_OPTIONS.find((c) => c.id === selectedColorSpace)?.shortLabel || '원본'}
+                </span>
               </button>
 
               {openAccordions.colorSpace && (
                 <div className="px-3.5 pb-3 space-y-2.5">
                   {/* Detected color space readout */}
                   {meta && (
-                    <div className="p-2 rounded bg-[#2B2B2E] border border-[#535356] text-[11px]">
-                      <div className="flex items-center justify-between text-[#888783] mb-0.5">
+                    <div className="py-2 border-b border-[#535356]/60 text-[11px] space-y-1">
+                      <div className="flex items-center justify-between text-[#888783]">
                         <span>원본 감지 색역</span>
                         <span className="text-[#E7E6E1] font-medium">
                           {meta.detectedColorSpace === 'adobe-rgb'
@@ -1403,12 +1331,12 @@ export function App() {
                             : '자동 감지'}
                         </span>
                       </div>
-                      <div className="text-[10px] text-[#C2C1BB] flex items-center justify-between">
+                      <div className="text-[10px] text-[#888783] flex items-center justify-between">
                         <span>프로파일 출처</span>
-                        <span className="text-[#E7E6E1]">
+                        <span className="text-[#C2C1BB]">
                           {meta.hasEmbeddedIcc
-                            ? '내장 ICC Profile (Tag 34675 / APP2)'
-                            : 'EXIF ColorSpace 메타데이터'}
+                            ? '내장 ICC Profile'
+                            : 'EXIF ColorSpace'}
                         </span>
                       </div>
                     </div>
@@ -1421,36 +1349,26 @@ export function App() {
                       <span className="text-[10px] text-[#888783]">16비트 리니어 매핑</span>
                     </div>
 
-                    <div className="space-y-1">
+                    <div className="divide-y divide-[#535356]/60 border border-[#535356] rounded overflow-hidden">
                       {COLOR_SPACE_OPTIONS.map((opt) => {
                         const isSelected = selectedColorSpace === opt.id;
                         return (
-                          <div
+                          <button
                             key={opt.id}
+                            type="button"
                             onClick={() => setSelectedColorSpace(opt.id)}
-                            className={`p-2 rounded border cursor-pointer transition-colors ${
+                            className={`w-full p-2 text-left cursor-pointer transition-colors flex items-center justify-between ${
                               isSelected
-                                ? 'bg-[#556042]/30 border-[#556042] text-white'
-                                : 'bg-[#2B2B2E] border-[#535356] text-[#C2C1BB] hover:bg-[#3A3A3D]'
+                                ? 'bg-[#556042]/25 text-[#F7F6F2]'
+                                : 'bg-[#2B2B2E] text-[#C2C1BB] hover:bg-[#3A3A3D]'
                             }`}
                           >
-                            <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-[11px] font-semibold flex items-center gap-1.5">
-                                <span
-                                  className={`w-2 h-2 rounded-full ${
-                                    isSelected ? 'bg-[#556042]' : 'bg-[#535356]'
-                                  }`}
-                                />
-                                {opt.label}
-                              </span>
-                              <span className="text-[9px] text-[#888783]">
-                                {opt.gamutCoverage}
-                              </span>
+                            <div>
+                              <div className="text-[11px] font-semibold">{opt.label}</div>
+                              <div className="text-[10px] text-[#888783] leading-tight">{opt.description}</div>
                             </div>
-                            <p className="text-[10px] text-[#888783] leading-tight pl-3.5">
-                              {opt.description}
-                            </p>
-                          </div>
+                            <span className="text-[9px] text-[#888783] ml-2 shrink-0">{opt.gamutCoverage}</span>
+                          </button>
                         );
                       })}
                     </div>
@@ -1466,65 +1384,69 @@ export function App() {
                 onClick={() =>
                   setOpenAccordions((p) => ({ ...p, metadata: !p.metadata }))
                 }
-                className="w-full flex items-center gap-1.5 px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
+                className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-[#2B2B2E] text-xs font-semibold text-[#E7E6E1] cursor-pointer text-left"
               >
-                {openAccordions.metadata ? (
-                  <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
-                ) : (
-                  <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                <div className="flex items-center gap-1.5">
+                  {openAccordions.metadata ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-[#888783]" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
+                  )}
+                  <span>카메라 메타데이터</span>
+                </div>
+                {meta && (
+                  <span className="text-[11px] font-normal text-[#888783] truncate max-w-[100px]">
+                    {meta.exif.model || ''}
+                  </span>
                 )}
-                <span>카메라 메타데이터 (EXIF)</span>
               </button>
 
               {openAccordions.metadata && (
-                <div className="p-3.5 space-y-3 bg-[#2B2B2E]">
+                <div className="px-3.5 py-2.5 bg-[#2B2B2E]">
                   {meta ? (
                     <div className="space-y-1.5 text-[11px]">
-                      <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
                         <span className="text-[#888783]">카메라 기종</span>
-                        <span className="text-[#E7E6E1] font-medium text-right max-w-[190px] truncate">
+                        <span className="text-[#E7E6E1] font-medium text-right max-w-[170px] truncate">
                           {[meta.exif.make, meta.exif.model].filter(Boolean).join(' ') || '카메라 태그 없음'}
                         </span>
                       </div>
                       {meta.exif.lensModel && (
-                        <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                        <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
                           <span className="text-[#888783]">렌즈 모델</span>
-                          <span className="text-[#E7E6E1] font-medium text-right max-w-[190px] truncate" title={meta.exif.lensModel}>
+                          <span className="text-[#E7E6E1] font-medium text-right max-w-[170px] truncate" title={meta.exif.lensModel}>
                             {meta.exif.lensModel}
                           </span>
                         </div>
                       )}
-                      <div className="grid grid-cols-2 gap-2 pt-0.5">
-                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
-                          <div className="text-[10px] text-[#888783]">조리개</div>
-                          <div className="text-xs text-[#E7E6E1] font-medium">
-                            {meta.exif.fNumber ? `f/${meta.exif.fNumber}` : '—'}
-                          </div>
-                        </div>
-                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
-                          <div className="text-[10px] text-[#888783]">셔터 스피드</div>
-                          <div className="text-xs text-[#E7E6E1] font-medium">
-                            {meta.exif.exposureTime || '—'}
-                          </div>
-                        </div>
-                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
-                          <div className="text-[10px] text-[#888783]">감도 (ISO)</div>
-                          <div className="text-xs text-[#E7E6E1] font-medium">
-                            {meta.exif.iso ? `ISO ${meta.exif.iso}` : '—'}
-                          </div>
-                        </div>
-                        <div className="bg-[#3A3A3D] p-2 rounded border border-[#535356]">
-                          <div className="text-[10px] text-[#888783]">초점거리</div>
-                          <div className="text-xs text-[#E7E6E1] font-medium">
-                            {meta.exif.focalLength || '—'}
-                          </div>
-                        </div>
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
+                        <span className="text-[#888783]">조리개</span>
+                        <span className="text-[#E7E6E1] tabular-nums font-medium">
+                          {meta.exif.fNumber ? `f/${meta.exif.fNumber}` : '—'}
+                        </span>
                       </div>
-
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
+                        <span className="text-[#888783]">셔터 스피드</span>
+                        <span className="text-[#E7E6E1] tabular-nums font-medium">
+                          {meta.exif.exposureTime || '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
+                        <span className="text-[#888783]">감도 (ISO)</span>
+                        <span className="text-[#E7E6E1] tabular-nums font-medium">
+                          {meta.exif.iso ? `ISO ${meta.exif.iso}` : '—'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between py-1 border-b border-[#535356]/60">
+                        <span className="text-[#888783]">초점거리</span>
+                        <span className="text-[#E7E6E1] tabular-nums font-medium">
+                          {meta.exif.focalLength || '—'}
+                        </span>
+                      </div>
                       {meta.exif.dateTime && (
-                        <div className="flex items-center justify-between py-1 border-b border-[#535356]">
+                        <div className="flex items-center justify-between py-1">
                           <span className="text-[#888783]">촬영 일시</span>
-                          <span className="text-[#C2C1BB] text-[10px]">
+                          <span className="text-[#C2C1BB] text-[10px] tabular-nums">
                             {meta.exif.dateTime}
                           </span>
                         </div>
@@ -1532,7 +1454,7 @@ export function App() {
                     </div>
                   ) : (
                     <div className="text-[11px] text-[#888783] text-center py-4">
-                      이미지를 불러오면 카메라 및 EXIF 메타데이터가 표시됩니다.
+                      이미지를 불러오면 메타데이터가 표시됩니다.
                     </div>
                   )}
                 </div>
@@ -1554,8 +1476,8 @@ export function App() {
                   ) : (
                     <ChevronRight className="w-3.5 h-3.5 text-[#888783]" />
                   )}
-                  <span>스팟</span>
-                  <span className="text-[11px] text-[#888783] font-normal ml-1">
+                  <span>검출 스팟</span>
+                  <span className="text-[11px] text-[#888783] font-normal tabular-nums ml-1">
                     {enabledSpotsCount}/{spots.length}
                   </span>
                 </button>
@@ -1565,7 +1487,7 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => handleToggleAllSpots(true)}
-                      className="hover:text-white cursor-pointer"
+                      className="hover:text-[#F7F6F2] cursor-pointer"
                     >
                       전체선택
                     </button>
@@ -1573,7 +1495,7 @@ export function App() {
                     <button
                       type="button"
                       onClick={() => handleToggleAllSpots(false)}
-                      className="hover:text-white cursor-pointer"
+                      className="hover:text-[#F7F6F2] cursor-pointer"
                     >
                       해제
                     </button>
@@ -1582,7 +1504,7 @@ export function App() {
               </div>
 
               {openAccordions.spots && (
-                <div className="flex-1 overflow-y-auto divide-y divide-[#535356]">
+                <div className="flex-1 overflow-y-auto divide-y divide-[#535356]/60">
                   {spots.length === 0 ? (
                     <div className="py-8 text-center text-[11px] text-[#888783]">
                       검출된 스팟 없음
@@ -1595,7 +1517,7 @@ export function App() {
                           key={spot.id}
                           onClick={() => setSelectedSpotId(spot.id)}
                           className={`flex items-center justify-between px-3.5 py-1.5 text-[11px] cursor-pointer transition-colors ${
-                            isSelected ? 'bg-[#556042]/30' : 'hover:bg-[#2B2B2E]'
+                            isSelected ? 'bg-[#556042]/25' : 'hover:bg-[#2B2B2E]'
                           }`}
                         >
                           <div className="flex items-center gap-2">
@@ -1611,19 +1533,19 @@ export function App() {
                             <span
                               className={
                                 spot.enabled
-                                  ? 'text-[#E7E6E1]'
+                                  ? 'text-[#E7E6E1] font-medium'
                                   : 'text-[#888783] line-through'
                               }
                             >
                               #{spot.index}
                             </span>
                             {spot.isMultiConfirmed && (
-                              <span className="text-[10px] text-[#C2C1BB]">
+                              <span className="text-[10px] text-[#C2C1BB] tabular-nums">
                                 {spot.matchCount}f
                               </span>
                             )}
                           </div>
-                          <div className="flex items-center gap-2.5 text-[#888783]">
+                          <div className="flex items-center gap-2.5 text-[#888783] tabular-nums">
                             <span>{spot.radius}px</span>
                             <span className="w-11 text-right">
                               -{spot.contrastDropPct}%
@@ -1638,76 +1560,6 @@ export function App() {
             </div>
           </aside>
         )}
-
-        {/* Desktop Rightmost Tool Rail */}
-        <div className="hidden md:flex w-11 bg-[#2B2B2E] border-l border-[#535356] flex-col items-center py-2.5 gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => setInteractionTool('inspect')}
-            title="선택 및 개별 토글"
-            className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
-              interactionTool === 'inspect'
-                ? 'bg-[#556042] text-white'
-                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
-            }`}
-          >
-            <MousePointer className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setInteractionTool('deselect-brush')}
-            title="드래그 지우개 브러시"
-            className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
-              interactionTool === 'deselect-brush'
-                ? 'bg-[#556042] text-white'
-                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
-            }`}
-          >
-            <Eraser className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setInteractionTool('brush-add')}
-            title="수동 복원 브러시"
-            className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
-              interactionTool === 'brush-add'
-                ? 'bg-[#556042] text-white'
-                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
-            }`}
-          >
-            <Paintbrush className="w-4 h-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setInteractionTool('brush-erase')}
-            title="수동 마스크 지우개"
-            className={`w-8 h-8 rounded flex items-center justify-center transition-colors cursor-pointer ${
-              interactionTool === 'brush-erase'
-                ? 'bg-[#556042] text-white'
-                : 'text-[#888783] hover:text-white hover:bg-[#3A3A3D]'
-            }`}
-          >
-            <RotateCcw className="w-4 h-4" />
-          </button>
-
-          <div className="w-5 h-[1px] bg-[#535356] my-1" />
-
-          <button
-            type="button"
-            onClick={() => setIsRightDockOpen((v) => !v)}
-            title="패널 접기/펴기"
-            className="w-8 h-8 rounded flex items-center justify-center text-[#888783] hover:text-white hover:bg-[#3A3A3D] transition-colors cursor-pointer"
-          >
-            {isRightDockOpen ? (
-              <PanelRightClose className="w-4 h-4" />
-            ) : (
-              <PanelRightOpen className="w-4 h-4" />
-            )}
-          </button>
-        </div>
       </div>
 
       {/* Mobile Slide-Up Contextual Tray */}
@@ -1825,10 +1677,10 @@ export function App() {
                 type="button"
                 onClick={() => handleRedetect()}
                 disabled={!sessionId || isProcessing}
-                className="w-full py-2 rounded-lg bg-[#556042] hover:bg-[#687652] text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0 cursor-pointer shadow-md disabled:opacity-40"
+                className="w-full py-2 rounded-lg bg-[#556042] hover:bg-[#687652] text-[#F7F6F2] text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0 cursor-pointer shadow-xs disabled:opacity-40"
               >
                 <Search className="w-4 h-4" />
-                <span>2. 먼지 분석 실행</span>
+                <span>먼지 분석 실행</span>
               </button>
 
               <div className="grid grid-cols-3 gap-1 p-0.5 bg-[#2B2B2E] border border-[#535356] rounded">

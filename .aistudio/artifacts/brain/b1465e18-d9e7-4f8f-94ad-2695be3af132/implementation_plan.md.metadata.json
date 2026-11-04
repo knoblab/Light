@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for adding a visual progress bar and percentage tracking inside the processing modal card during image loading, dust analysis, inpainting, and exporting.",
-  "updatedAt": "2026-11-03T15:30:16.981956519Z",
+  "summary": "UI/UX 개편 및 워크플로우 버튼 재배치 설계 계획서: 상단 바 단순화, 우측 인스펙터 상단에 핵심 실행 액션(먼지 분석 → 복원 적용) 통합, 하단 HUD에 캔버스 브러시 도구와 뷰어 컨트롤 통합, 그리고 지정된 그레이스케일 팔레트와 현행 하이라이트 컬러를 활용한 Anti-AI Slop 다크룸 정교화 계획입니다.",
+  "updatedAt": "2026-11-03T23:56:03.300123733Z",
   "requestFeedback": true,
   "userFacing": true
 }

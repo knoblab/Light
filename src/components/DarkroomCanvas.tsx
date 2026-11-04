@@ -6,6 +6,14 @@ import {
   Eye,
   EyeOff,
   Upload,
+  MousePointer,
+  Eraser,
+  Paintbrush,
+  RotateCcw,
+  Undo2,
+  Redo2,
+  Minus,
+  Plus,
 } from 'lucide-react';
 import {
   DetectedDustSpot,
@@ -46,6 +54,8 @@ interface DarkroomCanvasProps {
   onBeginHistoryBatch?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   filterMode?: 'all' | 'multi-confirmed' | 'single-frame';
   onChangeFilterMode?: (mode: 'all' | 'multi-confirmed' | 'single-frame') => void;
   isSequenceMode?: boolean;
@@ -79,6 +89,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   onBeginHistoryBatch,
   onUndo,
   onRedo,
+  canUndo = false,
+  canRedo = false,
   filterMode = 'all',
   onChangeFilterMode,
   isSequenceMode = false,
@@ -510,17 +522,17 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
       {!meta || !urls ? (
         <div
           onClick={() => fileInputRef.current?.click()}
-          className={`flex flex-col items-center justify-center px-8 py-10 rounded-lg border transition-colors cursor-pointer ${
+          className={`flex flex-col items-center justify-center px-10 py-12 rounded-lg border transition-colors cursor-pointer ${
             isDragOver
-              ? 'border-[#0A84FF] bg-[#0A84FF]/5'
-              : 'border-[#2E2E2E] bg-[#181818] hover:border-[#454545]'
+              ? 'border-[#556042] bg-[#3A3A3D]'
+              : 'border-[#535356] bg-[#3A3A3D]/70 hover:border-[#888783] hover:bg-[#3A3A3D]'
           }`}
         >
-          <Upload className="w-6 h-6 text-[#A0A0A0] mb-3" />
-          <span className="text-sm font-medium text-[#E5E5E5] mb-1">
-            사진 불러오기
+          <Upload className="w-7 h-7 text-[#C2C1BB] mb-3" />
+          <span className="text-sm font-semibold text-[#F7F6F2] mb-1">
+            사진 열기
           </span>
-          <span className="text-xs font-mono text-[#787878] mb-5">
+          <span className="text-xs text-[#888783] mb-5 tabular-nums">
             RW2 · DNG · CR2 · NEF · ARW · TIFF · PNG · JPG
           </span>
           <button
@@ -529,7 +541,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               e.stopPropagation();
               fileInputRef.current?.click();
             }}
-            className="px-4 py-2 rounded bg-[#0A84FF] hover:bg-[#0070E0] text-white text-xs font-medium transition-colors cursor-pointer whitespace-nowrap"
+            className="px-4 py-2 rounded bg-[#556042] hover:bg-[#687652] text-[#F7F6F2] text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shadow-xs"
           >
             파일 선택
           </button>
@@ -598,8 +610,118 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             />
           </div>
 
-          {/* Lightroom Floating Bottom-Center HUD Bar */}
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1 px-2 py-1 rounded-md bg-[#3A3A3D]/90 backdrop-blur-md border border-[#535356] shadow-lg max-w-[96vw] overflow-x-auto">
+          {/* Unified Darkroom HUD Dock */}
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#3A3A3D]/95 backdrop-blur-md border border-[#535356] shadow-xl max-w-[96vw] overflow-x-auto text-[#E7E6E1]">
+            {/* Tool Selection Segment */}
+            <div className="flex items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
+              <button
+                type="button"
+                onClick={() => onChangeInteractionTool('inspect')}
+                title="스팟 선택 및 토글 (V)"
+                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
+                  interactionTool === 'inspect'
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#C2C1BB]'
+                }`}
+              >
+                <MousePointer className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeInteractionTool('deselect-brush')}
+                title="스팟 해제 브러시 (D)"
+                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
+                  interactionTool === 'deselect-brush'
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#C2C1BB]'
+                }`}
+              >
+                <Eraser className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeInteractionTool('brush-add')}
+                title="수동 복원 브러시 (B)"
+                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
+                  interactionTool === 'brush-add'
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#C2C1BB]'
+                }`}
+              >
+                <Paintbrush className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeInteractionTool('brush-erase')}
+                title="마스크 지우개 (E)"
+                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
+                  interactionTool === 'brush-erase'
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#C2C1BB]'
+                }`}
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Brush Radius Controls (Visible when a brush tool is active) */}
+            {interactionTool !== 'inspect' && (
+              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
+                <button
+                  type="button"
+                  onClick={() => onChangeBrushRadius(Math.max(4, brushRadius - 4))}
+                  title="반경 축소 ([)"
+                  className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
+                >
+                  <Minus className="w-3 h-3" />
+                </button>
+                <input
+                  type="range"
+                  min={4}
+                  max={120}
+                  value={brushRadius}
+                  onChange={(e) => onChangeBrushRadius(Number(e.target.value))}
+                  className="lr-slider w-14"
+                  title="브러시 반경 조절"
+                />
+                <button
+                  type="button"
+                  onClick={() => onChangeBrushRadius(Math.min(120, brushRadius + 4))}
+                  title="반경 확대 (])"
+                  className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+                <span className="text-[10px] font-medium text-[#E7E6E1] tabular-nums w-7 text-right">
+                  {brushRadius}px
+                </span>
+              </div>
+            )}
+
+            {/* History Undo / Redo */}
+            <div className="flex items-center gap-0.5 shrink-0">
+              <button
+                type="button"
+                onClick={onUndo}
+                disabled={!canUndo}
+                title="되돌리기 (Ctrl+Z)"
+                className="p-1.5 rounded text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#2B2B2E] disabled:opacity-30 transition-colors cursor-pointer"
+              >
+                <Undo2 className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={onRedo}
+                disabled={!canRedo}
+                title="다시 실행 (Ctrl+Y)"
+                className="p-1.5 rounded text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#2B2B2E] disabled:opacity-30 transition-colors cursor-pointer"
+              >
+                <Redo2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
+
             {/* Dust Overlay Eye Toggle */}
             <button
               type="button"
@@ -607,8 +729,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               title="오버레이 표시 (O)"
               className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 showDustOverlay
-                  ? 'bg-[#556042] text-white'
-                  : 'text-[#C2C1BB] hover:text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
+                  : 'text-[#C2C1BB] hover:text-[#F7F6F2]'
               }`}
             >
               {showDustOverlay ? (
@@ -622,16 +744,17 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             <button
               type="button"
               onClick={() => setShowSpotLabels(!showSpotLabels)}
+              title="스팟 번호 라벨 토글"
               className={`px-2 py-1 rounded text-[11px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 showSpotLabels
-                  ? 'bg-[#556042] text-white'
-                  : 'text-[#888783] hover:text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
+                  : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
               #번호
             </button>
 
-            <div className="w-[1px] h-3.5 bg-[#535356] mx-0.5 shrink-0" />
+            <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
 
             {/* View Mode Selector */}
             <button
@@ -642,8 +765,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               }}
               className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 overlayMode === 'red-circle' && comparisonMode !== 'original-only' && comparisonMode !== 'split'
-                  ? 'bg-[#556042] text-white'
-                  : 'text-[#888783] hover:text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
+                  : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
               {hasInpaintedResult ? '복원본' : '작업본'}
@@ -658,8 +781,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 }}
                 className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   comparisonMode === 'split'
-                    ? 'bg-[#556042] text-white'
-                    : 'text-[#888783] hover:text-white'
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#F7F6F2]'
                 }`}
               >
                 분할
@@ -674,8 +797,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               }}
               className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 comparisonMode === 'original-only' && overlayMode !== 'bw-edge'
-                  ? 'bg-[#556042] text-white'
-                  : 'text-[#888783] hover:text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
+                  : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
               원본
@@ -688,8 +811,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               }
               className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 overlayMode === 'bw-edge'
-                  ? 'bg-[#556042] text-white'
-                  : 'text-[#888783] hover:text-white'
+                  ? 'bg-[#556042] text-[#F7F6F2]'
+                  : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
               엣지
@@ -698,12 +821,12 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             {/* Sequence Tier Filter */}
             {isSequenceMode && onChangeFilterMode && (
               <>
-                <div className="w-[1px] h-3.5 bg-[#535356] mx-0.5 shrink-0" />
+                <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
                 <button
                   type="button"
                   onClick={() => onChangeFilterMode('all')}
                   className={`px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                    filterMode === 'all' ? 'bg-[#556042] text-white' : 'text-[#888783]'
+                    filterMode === 'all' ? 'bg-[#556042] text-[#F7F6F2]' : 'text-[#888783]'
                   }`}
                 >
                   전체
@@ -713,7 +836,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                   onClick={() => onChangeFilterMode('multi-confirmed')}
                   className={`px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                     filterMode === 'multi-confirmed'
-                      ? 'bg-[#556042]/50 text-[#E7E6E1]'
+                      ? 'bg-[#556042]/50 text-[#F7F6F2]'
                       : 'text-[#888783]'
                   }`}
                 >
@@ -722,24 +845,24 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               </>
             )}
 
-            <div className="w-[1px] h-3.5 bg-[#535356] mx-0.5 shrink-0" />
+            <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
 
             {/* Zoom Controls */}
             <button
               type="button"
               onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
-              className="p-1 text-[#C2C1BB] hover:text-white cursor-pointer shrink-0"
+              className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
               title="축소"
             >
               <ZoomOut className="w-3.5 h-3.5" />
             </button>
-            <span className="text-[11px] text-[#C2C1BB] w-10 text-center shrink-0">
+            <span className="text-[11px] text-[#C2C1BB] tabular-nums w-10 text-center shrink-0">
               {Math.round(zoom * 100)}%
             </span>
             <button
               type="button"
               onClick={() => setZoom((z) => Math.min(4.0, Number((z + 0.25).toFixed(2))))}
-              className="p-1 text-[#C2C1BB] hover:text-white cursor-pointer shrink-0"
+              className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
               title="확대"
             >
               <ZoomIn className="w-3.5 h-3.5" />
@@ -750,8 +873,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 setZoom(1);
                 setPan({ x: 0, y: 0 });
               }}
-              className="p-1 text-[#C2C1BB] hover:text-white cursor-pointer shrink-0"
-              title="맞춤"
+              className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
+              title="화면 맞춤"
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>
