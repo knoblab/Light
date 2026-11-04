@@ -14,7 +14,6 @@ import {
   Redo2,
   Minus,
   Plus,
-  Check,
 } from 'lucide-react';
 import {
   DetectedDustSpot,
@@ -886,126 +885,37 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         </>
       )}
 
-      {/* Detailed Processing Modal with Step Tracker */}
+      {/* Compact Minimal Progress Indicator */}
       {isProcessing && (
-        <div className="absolute inset-0 bg-black/65 backdrop-blur-[3px] flex items-center justify-center z-50 px-4 animate-in fade-in duration-200">
-          <div className="p-5 md:p-6 rounded-2xl bg-[#2B2B2E] border border-[#535356] flex flex-col gap-4 shadow-2xl w-full max-w-md text-[#E7E6E1]">
-            {/* Header: Title + Overall % */}
-            <div className="flex items-center justify-between gap-3 border-b border-[#3A3A3D] pb-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-5 h-5 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
+        <div className="absolute inset-0 bg-black/30 backdrop-blur-[1px] flex items-center justify-center z-50 px-4 pointer-events-auto select-none">
+          <div className="px-4 py-3 rounded-xl bg-[#2B2B2E]/95 backdrop-blur-md border border-[#535356] shadow-2xl flex flex-col gap-2 w-72 text-[#E7E6E1]">
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-3.5 h-3.5 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
                 <div className="truncate">
-                  <h3 className="text-xs font-bold text-[#F7F6F2] truncate tracking-tight">
-                    {processingLabel || '다크룸 센서 연산 처리 중'}
-                  </h3>
-                  <p className="text-[11px] text-[#C2C1BB] truncate mt-0.5">
-                    {progressInfo
-                      ? `${progressInfo.stepIndex}/${progressInfo.totalSteps}단계 · ${progressInfo.stepName}`
-                      : '화소 분석 및 먼지 알고리즘 실행 중...'}
-                  </p>
+                  <span className="text-xs font-semibold text-[#F7F6F2] truncate block">
+                    {processingLabel || '처리 중...'}
+                  </span>
+                  {progressInfo?.stepName && progressInfo.stepName !== processingLabel && (
+                    <span className="text-[10px] text-[#888783] truncate block">
+                      {progressInfo.stepName}
+                    </span>
+                  )}
                 </div>
               </div>
-              <div className="text-right shrink-0">
-                <span className="text-base font-extrabold text-[#F7F6F2] tabular-nums tracking-tight">
-                  {progressInfo?.overallPercent ?? Math.min(100, Math.max(0, Math.round(progressPercent)))}%
-                </span>
-                <span className="block text-[9px] text-[#888783] uppercase tracking-wider font-medium">전체 진행률</span>
-              </div>
+              <span className="text-xs font-bold text-[#F7F6F2] tabular-nums shrink-0">
+                {Math.min(100, Math.max(0, Math.round(progressPercent)))}%
+              </span>
             </div>
 
-            {/* 4-Step Tracker Visual Nodes */}
-            {(() => {
-              const currentStep = progressInfo?.stepIndex ?? (
-                progressPercent < 25 ? 1 : progressPercent < 50 ? 2 : progressPercent < 75 ? 3 : 4
-              );
-              const totalSteps = progressInfo?.totalSteps ?? 4;
-              const stepTitles = ['디코딩', '가우시안 차분', '블롭 연산', '복원 인코딩'];
-
-              return (
-                <div className="space-y-2 py-1">
-                  <div className="grid grid-cols-4 gap-1 relative">
-                    {/* Background connecting line */}
-                    <div className="absolute top-3 left-4 right-4 h-0.5 bg-[#3A3A3D] -z-0" />
-
-                    {Array.from({ length: totalSteps }).map((_, idx) => {
-                      const stepNum = idx + 1;
-                      const isCompleted = stepNum < currentStep;
-                      const isActive = stepNum === currentStep;
-
-                      return (
-                        <div key={stepNum} className="flex flex-col items-center gap-1.5 z-10 relative">
-                          <div
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all duration-300 ${
-                              isCompleted
-                                ? 'bg-[#556042] text-[#F7F6F2] shadow-sm'
-                                : isActive
-                                ? 'bg-[#556042] text-[#F7F6F2] ring-4 ring-[#556042]/30 scale-110'
-                                : 'bg-[#3A3A3D] text-[#888783] border border-[#535356]'
-                            }`}
-                          >
-                            {isCompleted ? (
-                              <Check className="w-3 h-3 stroke-[3]" />
-                            ) : (
-                              <span className="tabular-nums">{stepNum}</span>
-                            )}
-                          </div>
-                          <span
-                            className={`text-[10px] text-center leading-tight truncate w-full px-0.5 ${
-                              isActive
-                                ? 'text-[#F7F6F2] font-semibold'
-                                : isCompleted
-                                ? 'text-[#C2C1BB]'
-                                : 'text-[#888783]'
-                            }`}
-                          >
-                            {stepTitles[idx] || `${stepNum}단계`}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Primary & Sub-step Progress Bars */}
-            <div className="space-y-2 bg-[#232326] p-3 rounded-xl border border-[#3A3A3D]">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-[#C2C1BB] font-medium flex items-center gap-1.5 truncate">
-                  {progressInfo ? (
-                    <>
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#556042] animate-pulse shrink-0" />
-                      <span className="truncate">{progressInfo.stepName}</span>
-                    </>
-                  ) : (
-                    <span>실시간 스레드 연산 중</span>
-                  )}
-                </span>
-                <span className="text-[#E7E6E1] font-semibold tabular-nums shrink-0 ml-2">
-                  {progressInfo ? `단계내 ${progressInfo.stepPercent}%` : `${Math.round(progressPercent)}%`}
-                </span>
-              </div>
-
-              {/* Step Sub-Progress Bar Track */}
-              <div className="w-full bg-[#3A3A3D] h-1.5 rounded-full overflow-hidden p-0.5">
-                <div
-                  style={{
-                    width: `${Math.min(
-                      100,
-                      Math.max(0, progressInfo ? progressInfo.stepPercent : progressPercent)
-                    )}%`,
-                  }}
-                  className="bg-[#556042] h-full rounded-full transition-all duration-150 ease-out"
-                />
-              </div>
-
-              {/* Overall Progress Bar Track */}
-              <div className="pt-1 border-t border-[#3A3A3D]/60 flex items-center justify-between text-[10px] text-[#888783]">
-                <span>전체 공정</span>
-                <span className="tabular-nums font-medium text-[#C2C1BB]">
-                  {progressInfo?.overallPercent ?? Math.round(progressPercent)}% / 100%
-                </span>
-              </div>
+            {/* Clean Single Slim Progress Bar */}
+            <div className="w-full bg-[#1E1E20] h-1.5 rounded-full overflow-hidden">
+              <div
+                style={{
+                  width: `${Math.min(100, Math.max(0, Math.round(progressPercent)))}%`,
+                }}
+                className="bg-[#556042] h-full rounded-full transition-all duration-150 ease-out"
+              />
             </div>
           </div>
         </div>

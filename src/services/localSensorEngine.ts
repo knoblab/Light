@@ -201,7 +201,8 @@ class LocalSensorEngineClient {
 
   async multiUpload(
     files: File[],
-    params: DetectionParams
+    params: DetectionParams,
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{
     sessions: Array<{
       sessionId: string;
@@ -225,7 +226,12 @@ class LocalSensorEngineClient {
       transfers.push(buf);
     }
 
-    const res = await this.callWorker('multi_upload', { files: fileItems, params }, transfers);
+    const res = await this.callWorker(
+      'multi_upload',
+      { files: fileItems, params },
+      transfers,
+      onProgress
+    );
 
     const sessions = (res.sessions || []).map((s: any) => ({
       sessionId: s.sessionId,
@@ -248,14 +254,20 @@ class LocalSensorEngineClient {
     sessionIds: string[],
     params: DetectionParams,
     tolerancePx = 14.0,
-    minFramesMatch = 2
+    minFramesMatch = 2,
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<MultiFrameReport & { perFrame: any[] }> {
-    return await this.callWorker('multi_detect', {
-      sessionIds,
-      params,
-      tolerancePx,
-      minFramesMatch,
-    });
+    return await this.callWorker(
+      'multi_detect',
+      {
+        sessionIds,
+        params,
+        tolerancePx,
+        minFramesMatch,
+      },
+      [],
+      onProgress
+    );
   }
 
   async multiExportZip(
@@ -266,9 +278,15 @@ class LocalSensorEngineClient {
       params: DetectionParams;
     }>,
     format: 'dng' | 'tiff16' | 'png' | 'jpg',
-    colorSpace: ColorSpaceId = 'auto'
+    colorSpace: ColorSpaceId = 'auto',
+    onProgress?: (percent: number, label?: string) => void
   ): Promise<{ zipBlob: Blob; downloadName: string }> {
-    return await this.callWorker('multi_export_zip', { items, format, colorSpace });
+    return await this.callWorker(
+      'multi_export_zip',
+      { items, format, colorSpace },
+      [],
+      onProgress
+    );
   }
 
   triggerBrowserDownload(blob: Blob, downloadName: string) {

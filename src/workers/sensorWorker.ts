@@ -98,9 +98,9 @@ async function processSingleIngestAndDetect(
   buffer: ArrayBuffer,
   params: DetectionParams
 ) {
-  sendDetailedProgress(reqId, 1, 4, '파일 디코딩 & RAW/TIFF 바이너리 파싱', 15);
+  sendProgress(reqId, 8, '파일 바이너리 파싱 중');
   const decoded = await decodeImageFileLocal(fileName, buffer);
-  sendDetailedProgress(reqId, 1, 4, '16-bit 메타데이터 & EXIF 태그 파싱', 85);
+  sendProgress(reqId, 22, '16-bit 메타데이터 추출 중');
   const fullW = decoded.fullWidth;
   const fullH = decoded.fullHeight;
 
@@ -114,13 +114,13 @@ async function processSingleIngestAndDetect(
     workH = Math.max(1, Math.round(fullH * workScale));
   }
 
-  sendDetailedProgress(reqId, 2, 4, '작업 영역 리사이즈 및 그레이스케일 추출', 25);
+  sendProgress(reqId, 30, '센서 작업 버퍼 추출 중');
   const workRgb8 =
     workW === fullW && workH === fullH
       ? new Uint8Array(decoded.origRgb8)
       : resizeRgb8Area(decoded.origRgb8, fullW, fullH, workW, workH);
 
-  sendDetailedProgress(reqId, 2, 4, '가우시안 차분(DoG) & 엣지 필터링', 60);
+  sendProgress(reqId, 36, '그레이스케일 변환 중');
   const detGray = computeDetGrayFromRgb8(workRgb8, workW, workH);
 
   // Compute 16-bit stats
@@ -177,7 +177,6 @@ async function processSingleIngestAndDetect(
     exif: decoded.exif,
   };
 
-  sendDetailedProgress(reqId, 3, 4, '블롭 연결성 분석 및 먼지 스팟 도출', 35);
   const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
     detGray,
     workW,
@@ -187,9 +186,12 @@ async function processSingleIngestAndDetect(
     workW,
     workH,
     workScale,
-    params
+    params,
+    (detPct, detLabel) => {
+      const mapped = Math.round(40 + (detPct / 100) * 48); // 40% ~ 88%
+      sendProgress(reqId, mapped, detLabel);
+    }
   );
-  sendDetailedProgress(reqId, 3, 4, '스팟 신뢰도 산출 및 역광 임계값 필터링', 90);
 
   sessions.set(sessionId, {
     sessionId,
@@ -202,7 +204,7 @@ async function processSingleIngestAndDetect(
     lastDetection: detectionResult,
   });
 
-  sendDetailedProgress(reqId, 4, 4, '1:1 미리보기 캔버스 생성 및 이미지 인코딩', 50);
+  sendProgress(reqId, 92, '다크룸 캔버스 인코딩 중');
 
   const [previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
     encodeRgb8ToBlob(workRgb8, workW, workH, 'image/jpeg', 0.96),
@@ -210,7 +212,7 @@ async function processSingleIngestAndDetect(
     encodeMaskU8ToBlob(maskAutoU8, workW, workH),
   ]);
 
-  sendDetailedProgress(reqId, 4, 4, '이미지 로딩 및 분석 완료', 100);
+  sendProgress(reqId, 100, '로딩 및 분석 완료');
 
   return {
     sessionId,
@@ -319,12 +321,12 @@ self.onmessage = async (event: MessageEvent) => {
 
     if (action === 'detect') {
       const { sessionId, params } = payload;
-      sendDetailedProgress(id, 1, 4, '메타데이터 & 이미지 그레이스케일 준비', 25);
+      sendProgress(id, 5, '먼지 분석 준비 중');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendDetailedProgress(id, 2, 4, '가우시안 차분(DoG) & 다중 스케일 탐지', 60);
+      sendProgress(id, 10, '다중 스케일 가우시안 차분(DoG) 탐지 시작');
       const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
         session.detGray,
         workWidth,
@@ -334,18 +336,21 @@ self.onmessage = async (event: MessageEvent) => {
         workWidth,
         workHeight,
         workScale,
-        params
+        params,
+        (detPct, detLabel) => {
+          const mapped = Math.round(10 + (detPct / 100) * 80); // 10% ~ 90%
+          sendProgress(id, mapped, detLabel);
+        }
       );
       session.lastDetection = detectionResult;
 
-      sendDetailedProgress(id, 3, 4, '블롭 스팟 클러스터링 및 신뢰도 검증', 80);
-      sendDetailedProgress(id, 4, 4, '미리보기 캔버스 생성 및 인코딩', 40);
+      sendProgress(id, 92, '미리보기 캔버스 인코딩 중');
       const [vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
         encodeRgb8ToBlob(vizBwEdgeRgb8, workWidth, workHeight, 'image/jpeg', 0.92),
         encodeMaskU8ToBlob(maskAutoU8, workWidth, workHeight),
       ]);
 
-      sendDetailedProgress(id, 4, 4, '먼지 탐지 분석 완료', 100);
+      sendProgress(id, 100, '먼지 분석 완료');
       self.postMessage({
         id,
         ok: true,
@@ -372,12 +377,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendDetailedProgress(id, 1, 4, '마스크 오버레이 렌더링 & ROI 영역 구별', 30);
+      sendProgress(id, 5, '마스크 오버레이 및 ROI 클러스터 분석 중');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendDetailedProgress(id, 2, 4, '16-bit 패치 매칭 & Fast Marching 복원', 55);
+      sendProgress(id, 10, '16-bit 패치 매칭 및 스팟 복원 시작');
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -390,20 +395,23 @@ self.onmessage = async (event: MessageEvent) => {
           spots || [],
           manualStrokes || [],
           inpaintRadius,
-          preserveGrain
+          preserveGrain,
+          (inpaintPct, inpaintLabel) => {
+            const mapped = Math.round(10 + (inpaintPct / 100) * 80); // 10% ~ 90%
+            sendProgress(id, mapped, inpaintLabel);
+          }
         );
 
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
-      sendDetailedProgress(id, 3, 4, '센서 노이즈 그레인 감쇄 보정', 85);
-      sendDetailedProgress(id, 4, 4, '1:1 복원 캔버스 렌더링 및 인코딩', 60);
+      sendProgress(id, 92, '복원 미리보기 캔버스 인코딩 중');
       const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
         encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
       ]);
 
-      sendDetailedProgress(id, 4, 4, '복원 완료', 100);
+      sendProgress(id, 100, '복원 완료');
       self.postMessage({
         id,
         ok: true,
@@ -434,12 +442,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendDetailedProgress(id, 1, 4, '1:1 원본 해상도 렌더링 준비', 20);
+      sendProgress(id, 5, '1:1 원본 해상도 렌더링 준비');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendDetailedProgress(id, 2, 4, '1:1 버퍼 생성 & 먼지 제거 복원', 50);
+      sendProgress(id, 10, '1:1 버퍼 생성 & 먼지 제거 복원 시작');
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -452,13 +460,17 @@ self.onmessage = async (event: MessageEvent) => {
           spots || [],
           manualStrokes || [],
           inpaintRadius,
-          preserveGrain
+          preserveGrain,
+          (inpaintPct, inpaintLabel) => {
+            const mapped = Math.round(10 + (inpaintPct / 100) * 55); // 10% ~ 65%
+            sendProgress(id, mapped, inpaintLabel);
+          }
         );
 
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
-      sendDetailedProgress(id, 3, 4, '16비트 색공간 변환 & ICC 프로파일 주입', 75);
+      sendProgress(id, 70, `${format.toUpperCase()} 파일 포맷 무손실 인코딩 중`);
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
@@ -468,7 +480,7 @@ self.onmessage = async (event: MessageEvent) => {
       const origBase = session.meta.originalFileName.replace(/\.[^/.]+$/, '');
       const downloadName = `${origBase}_cleaned.${ext}`;
 
-      sendDetailedProgress(id, 4, 4, '최종 무손실 인코딩 & 내보내기 완료', 100);
+      sendProgress(id, 100, '내보내기 완료');
 
       self.postMessage({
         id,
@@ -493,13 +505,16 @@ self.onmessage = async (event: MessageEvent) => {
       } = payload;
 
       const processedList = [];
-      for (let i = 0; i < files.length; i++) {
+      const total = files.length;
+      for (let i = 0; i < total; i++) {
         const f = files[i];
-        sendProgress(id, Math.round(((i + 1) / files.length) * 100), `연속 사진 ${i + 1}/${files.length} 로딩 중...`);
+        const basePct = Math.round((i / total) * 90);
+        sendProgress(id, basePct, `연속 사진 [${i + 1}/${total}] ${f.fileName} 불러오는 중`);
         const res = await processSingleIngestAndDetect(id, f.sessionId, f.fileName, f.buffer, params);
         processedList.push(res);
       }
 
+      sendProgress(id, 92, '다중 프레임 센서 먼지 상호 교차 클러스터링 중');
       const multiReport = runMultiFrameClustering(
         processedList.map((p) => ({
           sessionId: p.sessionId,
@@ -524,6 +539,7 @@ self.onmessage = async (event: MessageEvent) => {
         }
       }
 
+      sendProgress(id, 100, '연속 사진 로딩 및 교차 분석 완료');
       self.postMessage({
         id,
         ok: true,
@@ -549,9 +565,16 @@ self.onmessage = async (event: MessageEvent) => {
       } = payload;
 
       const frameInputs = [];
-      for (const sid of sessionIds) {
+      const total = sessionIds.length;
+      for (let i = 0; i < total; i++) {
+        const sid = sessionIds[i];
         const sess = sessions.get(sid);
         if (!sess) continue;
+
+        const frameStartPct = Math.round((i / total) * 90);
+        const frameEndPct = Math.round(((i + 1) / total) * 90);
+        sendProgress(id, frameStartPct, `연속 사진 [${i + 1}/${total}] ${sess.meta.originalFileName} 분석 중`);
+
         const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
         const { detectionResult } = detectSensorDustLocal(
           sess.detGray,
@@ -562,7 +585,11 @@ self.onmessage = async (event: MessageEvent) => {
           workWidth,
           workHeight,
           workScale,
-          params
+          params,
+          (detPct, detLabel) => {
+            const currentPct = Math.round(frameStartPct + (detPct / 100) * (frameEndPct - frameStartPct));
+            sendProgress(id, currentPct, `[${i + 1}/${total}] ${detLabel}`);
+          }
         );
         sess.lastDetection = detectionResult;
         frameInputs.push({
@@ -573,7 +600,10 @@ self.onmessage = async (event: MessageEvent) => {
         });
       }
 
+      sendProgress(id, 92, '다중 프레임 불변 센서 먼지 교차 매칭 중');
       const multiReport = runMultiFrameClustering(frameInputs, tolerancePx, minFramesMatch);
+      sendProgress(id, 100, '연속 사진 재분석 완료');
+
       self.postMessage({
         id,
         ok: true,
@@ -599,10 +629,16 @@ self.onmessage = async (event: MessageEvent) => {
       } = payload;
 
       const zipEntries: Array<{ name: string; data: Uint8Array }> = [];
-      for (let i = 0; i < items.length; i++) {
+      const total = items.length;
+      for (let i = 0; i < total; i++) {
         const it = items[i];
         const sess = sessions.get(it.sessionId);
         if (!sess) continue;
+
+        const frameStartPct = Math.round((i / total) * 90);
+        const frameEndPct = Math.round(((i + 1) / total) * 90);
+        sendProgress(id, frameStartPct, `배치 [${i + 1}/${total}] ${sess.meta.originalFileName} 복원 중`);
+
         const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
 
         const { healedRgb8, healedLinear16 } = inpaint16BitAndCameraRgbLocal(
@@ -616,9 +652,14 @@ self.onmessage = async (event: MessageEvent) => {
           it.spots || [],
           it.manualStrokes || [],
           it.params?.inpaintRadius ?? 6,
-          it.params?.preserveGrain ?? true
+          it.params?.preserveGrain ?? true,
+          (inpaintPct, inpaintLabel) => {
+            const currentPct = Math.round(frameStartPct + (inpaintPct / 100) * (frameEndPct - frameStartPct) * 0.7);
+            sendProgress(id, currentPct, `배치 [${i + 1}/${total}] ${inpaintLabel}`);
+          }
         );
 
+        sendProgress(id, Math.round(frameStartPct + (frameEndPct - frameStartPct) * 0.75), `배치 [${i + 1}/${total}] ${format.toUpperCase()} 인코딩 중`);
         const { blob, ext } = await renderExportBuffer(
           sess,
           format,
@@ -632,8 +673,10 @@ self.onmessage = async (event: MessageEvent) => {
         zipEntries.push({ name: entryName, data: new Uint8Array(arrBuf) });
       }
 
+      sendProgress(id, 94, 'ZIP 압축 아카이브 생성 중');
       const zipBlob = buildZipArchiveBlob(zipEntries);
       const downloadName = `SensorClean_Batch_${format.toUpperCase()}.zip`;
+      sendProgress(id, 100, '배치 내보내기 완료');
       self.postMessage({
         id,
         ok: true,

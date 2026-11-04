@@ -154,7 +154,7 @@ export function App() {
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
 
   const handleProgress = (percent: number, label?: string, info?: DetailedProgressInfo) => {
-    setProgressPercent(percent);
+    setProgressPercent((prev) => Math.max(prev, Math.min(100, Math.round(percent))));
     if (label) setProcessingLabel(label);
     if (info) setProgressInfo(info);
   };
@@ -285,7 +285,8 @@ export function App() {
   const handleUploadFile = async (file: File) => {
     setErrorMessage(null);
     setIsProcessing(true);
-    setProgressPercent(5);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel(`${file.name} 불러오는 중...`);
 
     try {
@@ -310,6 +311,7 @@ export function App() {
       setIsProcessing(false);
       setProcessingLabel('');
       setProgressPercent(0);
+      setProgressInfo(null);
     }
   };
 
@@ -321,7 +323,8 @@ export function App() {
     setParams(nextParams);
     setErrorMessage(null);
     setIsProcessing(true);
-    setProgressPercent(5);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel('먼지 분석 중...');
 
     try {
@@ -330,7 +333,8 @@ export function App() {
           sequenceItems.map((item) => item.sessionId),
           nextParams,
           14.0,
-          2
+          2,
+          handleProgress
         );
 
         const updatedItems = sequenceItems.map((item) => {
@@ -409,10 +413,12 @@ export function App() {
     if (files.length === 0) return;
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel(`연속 사진 ${files.length}장 불러오는 중...`);
 
     try {
-      const data = await localSensorEngine.multiUpload(files, params);
+      const data = await localSensorEngine.multiUpload(files, params, handleProgress);
 
       const items: MultiFrameItem[] = (data.sessions || []).map((s: any) => ({
         sessionId: s.sessionId,
@@ -448,6 +454,8 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
+      setProgressInfo(null);
     }
   };
 
@@ -479,6 +487,8 @@ export function App() {
     if (sequenceItems.length === 0) return;
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel(`연속 사진 ${sequenceItems.length}장 일괄 먼지 제거 적용 중...`);
 
     try {
@@ -489,14 +499,22 @@ export function App() {
       );
 
       const updatedItems = [...currentItems];
-      for (let i = 0; i < updatedItems.length; i++) {
+      const total = updatedItems.length;
+      for (let i = 0; i < total; i++) {
         const it = updatedItems[i];
+        const frameStart = Math.round((i / total) * 100);
+        const frameEnd = Math.round(((i + 1) / total) * 100);
+        handleProgress(frameStart, `연속 사진 [${i + 1}/${total}] 복원 중`);
         const data = await localSensorEngine.inpaint(
           it.sessionId,
           it.spots,
           it.manualStrokes,
           params.inpaintRadius,
-          params.preserveGrain
+          params.preserveGrain,
+          (pct, lbl) => {
+            const scaled = Math.round(frameStart + (pct / 100) * (frameEnd - frameStart));
+            handleProgress(scaled, `[${i + 1}/${total}] ${lbl || '복원 중'}`);
+          }
         );
         updatedItems[i] = {
           ...it,
@@ -522,6 +540,8 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
+      setProgressInfo(null);
     }
   };
 
@@ -532,6 +552,8 @@ export function App() {
     setMobileTab(null);
     setErrorMessage(null);
     setIsProcessing(true);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel(`ZIP 패키징 중 (${format.toUpperCase()})...`);
 
     try {
@@ -545,7 +567,8 @@ export function App() {
       const { zipBlob, downloadName } = await localSensorEngine.multiExportZip(
         exportItems,
         format,
-        selectedColorSpace
+        selectedColorSpace,
+        handleProgress
       );
       localSensorEngine.triggerBrowserDownload(zipBlob, downloadName);
     } catch (err: any) {
@@ -553,6 +576,7 @@ export function App() {
     } finally {
       setIsProcessing(false);
       setProcessingLabel('');
+      setProgressPercent(0);
       setTimeout(() => setExportingFormat(null), 400);
     }
   };
@@ -601,7 +625,8 @@ export function App() {
     pushHistorySnapshot();
     setErrorMessage(null);
     setIsProcessing(true);
-    setProgressPercent(5);
+    setProgressPercent(0);
+    setProgressInfo(null);
     setProcessingLabel('스팟 제거 적용 중...');
 
     try {
@@ -632,6 +657,7 @@ export function App() {
       setIsProcessing(false);
       setProcessingLabel('');
       setProgressPercent(0);
+      setProgressInfo(null);
     }
   };
 
@@ -643,7 +669,8 @@ export function App() {
     setMobileTab(null);
     setErrorMessage(null);
     setIsProcessing(true);
-    setProgressPercent(5);
+    setProgressPercent(0);
+    setProgressInfo(null);
 
     const formatNames: Record<string, string> = {
       dng: 'DNG (16-bit)',
@@ -687,6 +714,7 @@ export function App() {
       setIsProcessing(false);
       setProcessingLabel('');
       setProgressPercent(0);
+      setProgressInfo(null);
       setTimeout(() => setExportingFormat(null), 400);
     }
   };

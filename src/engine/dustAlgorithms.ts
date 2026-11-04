@@ -746,7 +746,8 @@ export function detectSensorDustLocal(
   workW: number,
   workH: number,
   workScale: number,
-  params: DetectionParams
+  params: DetectionParams,
+  onProgress?: (percent: number, label: string) => void
 ): {
   detectionResult: DetectionResult;
   vizBwEdgeRgb8: Uint8Array;
@@ -850,6 +851,8 @@ export function detectSensorDustLocal(
 
   const runSharp = ['dual', 'multiscale', 'hybrid', 'sharp', 'blackhat'].includes(method);
   const runBokeh = ['dual', 'multiscale', 'hybrid', 'bokeh', 'dog'].includes(method);
+
+  onProgress?.(20, '초점 미세 먼지 입자 스캔 중');
 
   // ─── BRANCH A: Sharp / Focused Sensor Dust Detector ───
   if (runSharp) {
@@ -1020,6 +1023,10 @@ export function detectSensorDustLocal(
     const absDev = new Float32Array(20000);
 
     for (let s = 0; s < 12; s++) {
+      onProgress?.(
+        Math.round(35 + ((s + 1) / 12) * 50),
+        `보케 먼지 다중 스케일 분석 중 (${s + 1}/12)`
+      );
       const rB = bokehRadii[s];
       const rP = rB * pyrScale;
       gaussianBlurFloat32(denoisePyr, pyrW, pyrH, rP * 0.45, gInBuf, pyrTmp);
@@ -1199,6 +1206,8 @@ export function detectSensorDustLocal(
     }
   }
 
+  onProgress?.(92, '스팟 신뢰도 검증 및 마스크 합성 중');
+
   // Build maskAutoU8 and vizBwEdgeRgb8 at working resolution (workW, workH)
   const maskAutoU8 = new Uint8Array(workW * workH);
   for (const sp of acceptedSpots) {
@@ -1245,6 +1254,8 @@ export function detectSensorDustLocal(
     totalDetected: acceptedSpots.length,
     spots: acceptedSpots,
   };
+
+  onProgress?.(100, '먼지 분석 완료');
 
   return { detectionResult, vizBwEdgeRgb8, maskAutoU8 };
 }
@@ -1534,7 +1545,8 @@ export function inpaint16BitAndCameraRgbLocal(
   spots: DetectedDustSpot[],
   manualStrokes: ManualBrushStroke[],
   inpaintRadiusFull: number,
-  preserveGrain: boolean
+  preserveGrain: boolean,
+  onProgress?: (percent: number, label: string) => void
 ): {
   healedRgb8: Uint8Array;
   healedLinear16: Uint16Array;
@@ -1544,6 +1556,8 @@ export function inpaint16BitAndCameraRgbLocal(
 } {
   const inpaintR = Math.max(3.0, Math.min(25.0, Number(inpaintRadiusFull || 6.0)));
   const skirtPadPx = Math.max(2, Math.round(inpaintR * 0.45));
+
+  onProgress?.(5, '마스크 영역 분석 및 복원 대상 확인 중');
 
   const fullMaskCore = buildFullResolutionMask(
     fullW,
@@ -1577,6 +1591,16 @@ export function inpaint16BitAndCameraRgbLocal(
     const visited = new Uint8Array(fullW * fullH);
     const q = new Int32Array(fullW * fullH);
     const randNorm = createSeededGaussianRng(42);
+
+    interface InpaintComponent {
+      bx1: number;
+      by1: number;
+      rw: number;
+      rh: number;
+      roiSize: number;
+      qIndices: Int32Array;
+    }
+    const components: InpaintComponent[] = [];
 
     for (let y = 0; y < fullH; y++) {
       const rowOff = y * fullW;
@@ -1626,13 +1650,34 @@ export function inpaint16BitAndCameraRgbLocal(
         const rh = by2 - by1;
         const roiSize = rw * rh;
 
-        const roiCore = new Uint8Array(roiSize);
-        for (let i = 0; i < qTail; i++) {
-          const idx = q[i];
-          const cy = Math.floor(idx / fullW);
-          const cx = idx - cy * fullW;
-          roiCore[(cy - by1) * rw + (cx - bx1)] = 255;
-        }
+        components.push({
+          bx1,
+          by1,
+          rw,
+          rh,
+          roiSize,
+          qIndices: q.slice(0, qTail),
+        });
+      }
+    }
+
+    const totalComponents = components.length;
+    for (let compIdx = 0; compIdx < totalComponents; compIdx++) {
+      const comp = components[compIdx];
+      onProgress?.(
+        Math.round(((compIdx + 1) / totalComponents) * 100),
+        `먼지 스팟 복원 중 (${compIdx + 1}/${totalComponents})`
+      );
+
+      const { bx1, by1, rw, rh, roiSize, qIndices } = comp;
+
+      const roiCore = new Uint8Array(roiSize);
+      for (let i = 0; i < qIndices.length; i++) {
+        const idx = qIndices[i];
+        const cy = Math.floor(idx / fullW);
+        const cx = idx - cy * fullW;
+        roiCore[(cy - by1) * rw + (cx - bx1)] = 255;
+      }
 
         const roiExpanded = dilateMaskCircular(roiCore, rw, rh, featherPx);
         const roiOuterDilated = dilateMaskCircular(roiExpanded, rw, rh, ringWidthPx);
@@ -1821,7 +1866,6 @@ export function inpaint16BitAndCameraRgbLocal(
         }
       }
     }
-  }
 
   const workHealedRgb8 = resizeRgb8Area(healedRgb8, fullW, fullH, workW, workH);
   const workMaskU8 = new Uint8Array(workW * workH);
@@ -1843,6 +1887,8 @@ export function inpaint16BitAndCameraRgbLocal(
     fullWidth: fullW,
     fullHeight: fullH,
   };
+
+  onProgress?.(100, '복원 완료');
 
   return {
     healedRgb8,
