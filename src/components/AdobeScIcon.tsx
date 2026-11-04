@@ -1,0 +1,87 @@
+import React from 'react';
+
+interface AdobeScIconProps {
+  className?: string;
+  size?: number;
+}
+
+export const AdobeScIcon: React.FC<AdobeScIconProps> = ({
+  className = 'w-5 h-5',
+  size,
+}) => {
+  const style = size ? { width: size, height: size } : undefined;
+
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 128 128"
+      className={`shrink-0 select-none ${className}`}
+      style={style}
+      fill="none"
+      aria-label="SensorClean Sc Icon"
+    >
+      <defs>
+        {/* Adobe Base Dark Container Gradient */}
+        <linearGradient id="scCompBgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#081426" />
+          <stop offset="55%" stopColor="#040B16" />
+          <stop offset="100%" stopColor="#01040A" />
+        </linearGradient>
+
+        {/* Adobe Signature Inset Border Accent (Cyan to Vivid Sky Blue) */}
+        <linearGradient id="scCompBorderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#38BDF8" />
+          <stop offset="50%" stopColor="#0EA5E9" />
+          <stop offset="100%" stopColor="#0284C7" />
+        </linearGradient>
+
+        {/* Sc Typography Vibrant Fill */}
+        <linearGradient id="scCompTextGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#BAE6FD" />
+          <stop offset="35%" stopColor="#38BDF8" />
+          <stop offset="100%" stopColor="#0284C7" />
+        </linearGradient>
+
+        {/* Subtle Vignette / Specular Glow */}
+        <radialGradient id="scCompTopGlow" cx="50%" cy="15%" r="65%">
+          <stop offset="0%" stopColor="#38BDF8" stopOpacity="0.18" />
+          <stop offset="60%" stopColor="#0EA5E9" stopOpacity="0.04" />
+          <stop offset="100%" stopColor="#000000" stopOpacity="0" />
+        </radialGradient>
+
+        <filter id="scCompGlow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="#0284C7" floodOpacity="0.45" />
+        </filter>
+      </defs>
+
+      {/* 1. Adobe Rounded Squircle Base (26px border radius) */}
+      <rect width="128" height="128" rx="26" fill="url(#scCompBgGrad)" />
+      <rect width="128" height="128" rx="26" fill="url(#scCompTopGlow)" />
+
+      {/* 2. Adobe Signature Inset Accent Border */}
+      <rect
+        x="7.5"
+        y="7.5"
+        width="113"
+        height="113"
+        rx="20.5"
+        fill="none"
+        stroke="url(#scCompBorderGrad)"
+        strokeWidth="5"
+      />
+
+      {/* 3. Micro Precision Sensor Reticles in 4 corners */}
+      <circle cx="20" cy="20" r="1.5" fill="#38BDF8" opacity="0.45" />
+      <circle cx="108" cy="20" r="1.5" fill="#38BDF8" opacity="0.45" />
+      <circle cx="20" cy="108" r="1.5" fill="#38BDF8" opacity="0.45" />
+      <circle cx="108" cy="108" r="1.5" fill="#38BDF8" opacity="0.45" />
+
+      {/* 4. Adobe Two-Letter Monogram: Sc (Pure Precision Vector Paths) */}
+      <path
+        d="M63.52 73.80Q63.52 80.85 58.43 85.05Q53.35 89.24 43.99 89.24Q35.61 89.24 29.00 86.05V75.58Q32.79 77.22 36.83 78.59Q40.88 79.96 44.89 79.96Q49.04 79.96 50.79 78.37Q52.53 76.77 52.53 74.32Q52.53 72.32 51.16 70.91Q49.78 69.50 47.48 68.27Q45.18 67.05 42.21 65.64Q40.36 64.75 38.20 63.52Q36.05 62.30 34.08 60.48Q32.12 58.66 30.86 56.06Q29.59 53.46 29.59 49.83Q29.59 42.70 34.42 38.73Q39.24 34.76 47.56 34.76Q51.71 34.76 55.46 35.72Q59.21 36.69 63.29 38.47L59.66 47.23Q56.02 45.74 53.12 44.93Q50.23 44.11 47.19 44.11Q43.99 44.11 42.29 45.60Q40.58 47.08 40.58 49.46Q40.58 52.28 43.10 53.91Q45.63 55.54 50.60 57.92Q54.68 59.85 57.54 61.93Q60.40 64.00 61.96 66.82Q63.52 69.65 63.52 73.80ZM86.43 89.24Q77.37 89.24 72.44 84.23Q67.50 79.22 67.50 68.46Q67.50 61.04 70.02 56.36Q72.55 51.68 77.04 49.46Q81.53 47.23 87.39 47.23Q91.55 47.23 94.63 48.04Q97.71 48.86 100.01 49.97L96.75 58.51Q94.15 57.47 91.88 56.80Q89.62 56.14 87.39 56.14Q78.78 56.14 78.78 68.38Q78.78 74.47 81.05 77.37Q83.31 80.26 87.39 80.26Q90.88 80.26 93.55 79.33Q96.23 78.40 98.75 76.77V86.20Q96.23 87.83 93.44 88.54Q90.66 89.24 86.43 89.24Z"
+        fill="url(#scCompTextGrad)"
+        filter="url(#scCompGlow)"
+      />
+    </svg>
+  );
+};
