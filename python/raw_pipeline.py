@@ -85,7 +85,7 @@ def extract_exif_metadata(file_path: str) -> Dict[str, Any]:
                             meta_summary['exposureTime'] = f"{round(et[0]/et[1], 2)}s"
                 if 'FocalLength' in exif_dict:
                     fl = exif_dict['FocalLength']
-                    if isinstance(fl, (list, tuple)) and len(fl, (list, tuple)) and fl[1] != 0:
+                    if isinstance(fl, (list, tuple)) and len(fl) == 2 and fl[1] != 0:
                         meta_summary['focalLength'] = f"{round(fl[0]/fl[1], 1)}mm"
     except Exception:
         pass
@@ -131,6 +131,41 @@ _SRGB8_TO_LINEAR16_LUT = np.clip(np.round(_LIN_256 * 65535.0), 0, 65535).astype(
 
 # Precomputed 65536-entry normalized ramp (0..1 float32) for instant 16-bit -> sRGB LUT generation
 _NORM_65536 = np.arange(65536, dtype=np.float32) / 65535.0
+
+# Persistent in-memory checkpoint cache (LRU max 3 sessions) for 0ms export & incremental ROI pen edits
+_SESSION_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _get_or_load_session_cache(session_dir: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    if session_dir in _SESSION_CACHE:
+        entry = _SESSION_CACHE.pop(session_dir)
+        _SESSION_CACHE[session_dir] = entry
+        return entry
+
+    while len(_SESSION_CACHE) >= 3:
+        oldest_key = next(iter(_SESSION_CACHE))
+        _SESSION_CACHE.pop(oldest_key, None)
+
+    linear_16bit = np.load(os.path.join(session_dir, "linear_16bit.npy"))
+    work_srgb_path = os.path.join(session_dir, "work_srgb_u8.npy")
+    if os.path.exists(work_srgb_path):
+        work_orig_u8 = np.load(work_srgb_path)
+    else:
+        lut_u8 = build_srgb_u8_lut(float(meta.get("exposureScale", 1.0)))
+        work_orig_u8 = lut_u8[linear_16bit]
+
+    entry = {
+        "linear_16bit": linear_16bit,
+        "checkpoint_16bit": np.copy(linear_16bit),
+        "work_orig_u8": work_orig_u8,
+        "checkpoint_work_u8": np.copy(work_orig_u8),
+        "baked_spots": {},
+        "baked_strokes": {},
+        "baked_params": None,
+        "last_inpaint_result": None,
+    }
+    _SESSION_CACHE[session_dir] = entry
+    return entry
 
 
 def build_srgb_u8_lut(exposure_scale: float) -> np.ndarray:
@@ -281,10 +316,12 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
 
         if rgb.dtype == np.uint16:
             linear_rgb_16 = rgb
+            exposure_scale_override = 1.0
         else:
             linear_rgb_16 = _SRGB8_TO_LINEAR16_LUT[rgb]
             exposure_scale_override = 1.0
 
+    is_input_16bit = bool(not is_raw and 'rgb' in locals() and rgb.dtype == np.uint16)
     full_h, full_w = int(linear_rgb_16.shape[0]), int(linear_rgb_16.shape[1])
     np.save(os.path.join(session_dir, "linear_16bit.npy"), linear_rgb_16)
 
@@ -302,16 +339,27 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
 
     np.save(os.path.join(session_dir, "work_linear_16bit.npy"), work_linear_16)
 
-    srgb_preview_u8, exposure_scale = linear_16bit_to_srgb_8bit(
-        work_linear_16, exposure_scale=exposure_scale_override
-    )
+    if is_input_16bit:
+        srgb_preview_u8 = np.clip(np.round(work_linear_16.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+        exposure_scale = 1.0
+    else:
+        srgb_preview_u8, exposure_scale = linear_16bit_to_srgb_8bit(
+            work_linear_16, exposure_scale=exposure_scale_override
+        )
     np.save(os.path.join(session_dir, "work_srgb_u8.npy"), srgb_preview_u8)
     preview_bgr = cv2.cvtColor(srgb_preview_u8, cv2.COLOR_RGB2BGR)
     preview_path = os.path.join(session_dir, "preview_original.jpg")
     cv2.imwrite(preview_path, preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
 
     # Pre-cache 2304px perceptual luminance array so dust detection / re-detection starts in <3ms
-    gray_det = compute_det_gray_from_16bit(work_linear_16, is_raw, exposure_scale)
+    if is_input_16bit:
+        gray_det = (
+            0.2126 * srgb_preview_u8[:, :, 0].astype(np.float32) +
+            0.7152 * srgb_preview_u8[:, :, 1].astype(np.float32) +
+            0.0722 * srgb_preview_u8[:, :, 2].astype(np.float32)
+        )
+    else:
+        gray_det = compute_det_gray_from_16bit(work_linear_16, is_raw, exposure_scale)
     np.save(os.path.join(session_dir, "det_gray.npy"), gray_det)
 
     sub_stats = linear_rgb_16[::4, ::4]
@@ -324,14 +372,16 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
         "originalFileName": os.path.basename(input_path),
         "extension": ext.upper().lstrip('.'),
         "isRaw": is_raw,
+        "isInput16Bit": is_input_16bit,
+        "isLinear16": bool(is_raw or not is_input_16bit),
         "fullWidth": full_w,
         "fullHeight": full_h,
         "workWidth": work_w,
         "workHeight": work_h,
         "workScale": scale,
         "exposureScale": exposure_scale,
-        "bitDepth": "16-bit Linear (uint16)",
-        "colorSpace": "Camera Linear RGB (Gamma 1.0)" if is_raw else "Linearized 16-bit RGB",
+        "bitDepth": "16-bit Linear (uint16)" if not is_input_16bit else "16-bit Lossless RGB (uint16)",
+        "colorSpace": "Camera Linear RGB (Gamma 1.0)" if is_raw else ("16-bit Original RGB" if is_input_16bit else "Linearized 16-bit RGB"),
         "cameraWb": camera_wb[:4],
         "colorMatrix": color_matrix,
         "blackLevel": black_level,
@@ -348,6 +398,21 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
 
     with open(os.path.join(session_dir, "session_meta.json"), "w", encoding="utf-8") as f:
         json.dump(session_meta, f, ensure_ascii=False, indent=2)
+
+    while len(_SESSION_CACHE) >= 3:
+        oldest_key = next(iter(_SESSION_CACHE))
+        _SESSION_CACHE.pop(oldest_key, None)
+
+    _SESSION_CACHE[session_dir] = {
+        "linear_16bit": linear_rgb_16,
+        "checkpoint_16bit": np.copy(linear_rgb_16),
+        "work_orig_u8": srgb_preview_u8,
+        "checkpoint_work_u8": np.copy(srgb_preview_u8),
+        "baked_spots": {},
+        "baked_strokes": {},
+        "baked_params": None,
+        "last_inpaint_result": None,
+    }
 
     return session_meta
 
@@ -967,33 +1032,123 @@ def build_combined_mask(
     return mask
 
 
+def _spot_full_bbox(spot: Dict[str, Any], work_scale: float, pad_full: int, full_w: int, full_h: int) -> Tuple[int, int, int, int]:
+    cx = float(spot.get("cx", spot.get("x", 0.0)))
+    cy = float(spot.get("cy", spot.get("y", 0.0)))
+    raw_r = float(spot.get("radius", spot.get("r", 10.0)))
+    skirt_mult = 1.72 if spot.get("spotType") == "bokeh" else 1.55
+    r_full = max(raw_r * skirt_mult + 3.0 / max(work_scale, 1e-4), float(spot.get("workRadius", 0) or 0) / max(work_scale, 1e-4))
+    rad = int(math.ceil(r_full)) + pad_full
+    return (
+        max(0, int(math.floor(cx)) - rad),
+        max(0, int(math.floor(cy)) - rad),
+        min(full_w, int(math.ceil(cx)) + rad + 1),
+        min(full_h, int(math.ceil(cy)) + rad + 1),
+    )
+
+
+def _stroke_full_bbox(stroke: Dict[str, Any], pad_full: int, full_w: int, full_h: int) -> Tuple[int, int, int, int]:
+    pts = stroke.get("points", [])
+    if not pts:
+        return (0, 0, 0, 0)
+    r_full = int(math.ceil(float(stroke.get("radius", 12.0)))) + pad_full
+    xs = [float(p["x"]) for p in pts]
+    ys = [float(p["y"]) for p in pts]
+    return (
+        max(0, int(math.floor(min(xs))) - r_full),
+        max(0, int(math.floor(min(ys))) - r_full),
+        min(full_w, int(math.ceil(max(xs))) + r_full + 1),
+        min(full_h, int(math.ceil(max(ys))) + r_full + 1),
+    )
+
+
+def _boxes_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> bool:
+    return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+
+
 def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Zero-Halo 16-bit Plane-Detrended Harmonic + Telea Inpainting:
-      1. Full-Skirt Mask Expansion: Dilates the mask past the entire Gaussian bokeh tail so
-         boundary pixels are sampled strictly from clean, unshadowed background sky.
-      2. Outward-Only Feathering: Guarantees alpha == 1.0 across 100% of the dust core & skirt
-         (so zero original dark dust ring can ever bleed back in), tapering smoothly from 1.0 to 0.0
-         only in the clean outer transition ring.
-      3. Plane-Detrended Harmonic Telea: Fits a 1st-order background plane (ax + by + c) with
-         symmetric outlier trimming ([15, 85] percentiles -> zero upward/downward brightness bias),
-         subtracts the gradient plane before running Telea + harmonic Gaussian smoothing, and
-         restores the plane + matched local sensor grain.
+    Zero-Halo 16-bit Plane-Detrended Harmonic + Telea Inpainting with Incremental Checkpoint Cache:
+      - Maintains an in-memory 16-bit checkpoint (`checkpoint_16bit`) and 8-bit preview checkpoint (`checkpoint_work_u8`).
+      - If no spots or strokes changed since the last checkpoint, returns immediately in 0ms (`fromCache: True`).
+      - When spots/strokes are added or removed with the pen tools, only the affected delta ROI bounding boxes
+        are restored from `linear_16bit` or healed incrementally onto `checkpoint_16bit`.
     """
     with open(os.path.join(session_dir, "session_meta.json"), "r", encoding="utf-8") as f:
         meta = json.load(f)
 
-    linear_16bit = np.load(os.path.join(session_dir, "linear_16bit.npy"))
+    cache = _get_or_load_session_cache(session_dir, meta)
+    linear_16bit = cache["linear_16bit"]
     full_h, full_w = linear_16bit.shape[:2]
     work_h = int(meta["workHeight"])
     work_w = int(meta["workWidth"])
     work_scale = float(meta["workScale"])
     exposure_scale = float(meta["exposureScale"])
+    is_input_16bit = bool(meta.get("isInput16Bit", False))
 
     active_spots = params.get("spots") or params.get("activeSpots") or params.get("candidates") or []
     manual_strokes = params.get("manualStrokes", [])
     inpaint_radius_full = float(params.get("inpaintRadius", 6.0))
     preserve_grain = bool(params.get("preserveGrain", True))
+
+    inpaint_r = max(3.0, min(25.0, inpaint_radius_full))
+    skirt_pad_px = max(2, int(round(inpaint_r * 0.45)))
+    feather_px = max(3, int(round(inpaint_r * 0.70)))
+    feather_sigma = max(2.0, feather_px * 0.55)
+    ring_width_px = max(7, int(round(inpaint_r * 1.4 + 5)))
+    ring_pad = ring_width_px + 4
+    restore_pad = skirt_pad_px + feather_px + 6
+
+    curr_spots_map: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    for idx, s in enumerate(active_spots):
+        if not s.get("enabled", True):
+            continue
+        sid = str(s.get("id", f"spot_{idx}"))
+        sig = (
+            round(float(s.get("cx", s.get("x", 0.0))), 2),
+            round(float(s.get("cy", s.get("y", 0.0))), 2),
+            round(float(s.get("radius", s.get("r", 8.0))), 2),
+            round(float(s.get("workRadius", 0.0) or 0.0), 2),
+            str(s.get("spotType", "sharp")),
+        )
+        curr_spots_map[sid] = (sig, s)
+
+    curr_strokes_map: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    for idx, st in enumerate(manual_strokes):
+        if st.get("mode", "add") != "add":
+            continue
+        pts = st.get("points", [])
+        if not pts:
+            continue
+        stid = str(st.get("id", f"stroke_{idx}"))
+        sig = (
+            round(float(st.get("radius", 12.0)), 2),
+            len(pts),
+            round(float(pts[0]["x"]), 1),
+            round(float(pts[0]["y"]), 1),
+            round(float(pts[-1]["x"]), 1),
+            round(float(pts[-1]["y"]), 1),
+        )
+        curr_strokes_map[stid] = (sig, st)
+
+    baked_spots: Dict[str, Tuple[Any, Dict[str, Any]]] = cache.get("baked_spots", {})
+    baked_strokes: Dict[str, Tuple[Any, Dict[str, Any]]] = cache.get("baked_strokes", {})
+    baked_params = cache.get("baked_params")
+    current_params_sig = (round(inpaint_r, 2), preserve_grain)
+
+    # Check if state is 100% identical to cached checkpoint
+    if (
+        baked_params == current_params_sig
+        and cache.get("last_inpaint_result") is not None
+        and set(curr_spots_map.keys()) == set(baked_spots.keys())
+        and set(curr_strokes_map.keys()) == set(baked_strokes.keys())
+        and all(curr_spots_map[k][0] == baked_spots[k][0] for k in curr_spots_map)
+        and all(curr_strokes_map[k][0] == baked_strokes[k][0] for k in curr_strokes_map)
+    ):
+        cached_res = dict(cache["last_inpaint_result"])
+        cached_res["fromCache"] = True
+        cached_res["incrementalRois"] = 0
+        return cached_res
 
     work_mask = build_combined_mask(work_h, work_w, work_scale, active_spots, manual_strokes)
     cv2.imwrite(os.path.join(session_dir, "mask_final_work.png"), work_mask)
@@ -1003,168 +1158,222 @@ def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, 
     else:
         full_mask = work_mask
 
-    inpaint_r = max(3.0, min(25.0, inpaint_radius_full))
-    skirt_pad_px = max(2, int(round(inpaint_r * 0.45)))
     k_skirt = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (skirt_pad_px * 2 + 1, skirt_pad_px * 2 + 1))
     full_mask_core = cv2.dilate(full_mask, k_skirt, iterations=1)
-
     inpainted_pixels = int(np.count_nonzero(full_mask_core))
-    enabled_spot_count = sum(1 for s in active_spots if s.get("enabled", True)) + sum(
-        1 for st in manual_strokes if st.get("mode", "add") == "add"
+    enabled_spot_count = len(curr_spots_map) + len(curr_strokes_map)
+
+    if baked_params != current_params_sig or cache.get("checkpoint_16bit") is None:
+        cache["checkpoint_16bit"] = np.copy(linear_16bit)
+        cache["checkpoint_work_u8"] = np.copy(cache["work_orig_u8"])
+        baked_spots = {}
+        baked_strokes = {}
+
+    checkpoint_16bit = cache["checkpoint_16bit"]
+    checkpoint_work_u8 = cache["checkpoint_work_u8"]
+    work_orig_u8 = cache["work_orig_u8"]
+
+    # Determine removed/modified items and newly added items
+    removed_spot_ids = [
+        sid for sid in baked_spots
+        if sid not in curr_spots_map or baked_spots[sid][0] != curr_spots_map[sid][0]
+    ]
+    added_spot_ids = set(
+        sid for sid in curr_spots_map
+        if sid not in baked_spots or baked_spots[sid][0] != curr_spots_map[sid][0]
     )
 
-    inpainted_16bit = np.copy(linear_16bit)
+    removed_stroke_ids = [
+        stid for stid in baked_strokes
+        if stid not in curr_strokes_map or baked_strokes[stid][0] != curr_strokes_map[stid][0]
+    ]
+    added_stroke_ids = set(
+        stid for stid in curr_strokes_map
+        if stid not in baked_strokes or baked_strokes[stid][0] != curr_strokes_map[stid][0]
+    )
 
-    if inpainted_pixels > 0:
-        feather_px = max(3, int(round(inpaint_r * 0.70)))
-        feather_sigma = max(2.0, feather_px * 0.55)
-        ring_width_px = max(7, int(round(inpaint_r * 1.4 + 5)))
-        ring_pad = ring_width_px + 4
+    restored_boxes: List[Tuple[int, int, int, int]] = []
+    for sid in removed_spot_ids:
+        _, old_spot = baked_spots[sid]
+        box = _spot_full_bbox(old_spot, work_scale, restore_pad, full_w, full_h)
+        restored_boxes.append(box)
 
-        rng = np.random.default_rng(42)
-        k_feather = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (feather_px * 2 + 1, feather_px * 2 + 1))
-        k_ring = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_width_px * 2 + 1, ring_width_px * 2 + 1))
+    for stid in removed_stroke_ids:
+        _, old_stroke = baked_strokes[stid]
+        box = _stroke_full_bbox(old_stroke, restore_pad, full_w, full_h)
+        if box[2] > box[0] and box[3] > box[1]:
+            restored_boxes.append(box)
 
-        # Dilate by feather_px first so only spots whose feathered masks actually touch share a component;
-        # prevents chaining non-overlapping spots across the entire sky into a slow megabox
-        full_mask_expanded = cv2.dilate(full_mask_core, k_feather, iterations=1)
-        num_labels, labels_exp, stats, _ = cv2.connectedComponentsWithStats(full_mask_expanded, connectivity=8)
+    # Restore removed regions from original linear_16bit & work_orig_u8
+    for bx1, by1, bx2, by2 in restored_boxes:
+        checkpoint_16bit[by1:by2, bx1:bx2] = linear_16bit[by1:by2, bx1:bx2]
+        wx1 = max(0, int(math.floor(bx1 * work_scale)))
+        wy1 = max(0, int(math.floor(by1 * work_scale)))
+        wx2 = min(work_w, int(math.ceil(bx2 * work_scale)))
+        wy2 = min(work_h, int(math.ceil(by2 * work_scale)))
+        if wx2 > wx1 and wy2 > wy1:
+            checkpoint_work_u8[wy1:wy2, wx1:wx2] = work_orig_u8[wy1:wy2, wx1:wx2]
 
-        merged_boxes = []
-        for i in range(1, num_labels):
-            x = int(stats[i, cv2.CC_STAT_LEFT])
-            y = int(stats[i, cv2.CC_STAT_TOP])
-            w = int(stats[i, cv2.CC_STAT_WIDTH])
-            h = int(stats[i, cv2.CC_STAT_HEIGHT])
-            bx1 = max(0, x - ring_pad)
-            by1 = max(0, y - ring_pad)
-            bx2 = min(full_w, x + w + ring_pad)
-            by2 = min(full_h, y + h + ring_pad)
-            merged_boxes.append((bx1, by1, bx2, by2))
-
-            roi_expanded = ((labels_exp[by1:by2, bx1:bx2] == i).astype(np.uint8)) * 255
-            roi_core = np.where(roi_expanded > 0, full_mask_core[by1:by2, bx1:bx2], 0)
-            if np.count_nonzero(roi_core) == 0:
+    # If any still-active spot or stroke overlaps a restored box, include it in added set so it stays healed
+    if restored_boxes:
+        for sid, (_, sp) in curr_spots_map.items():
+            if sid in added_spot_ids:
                 continue
-
-            # Outward-only feather mask: 1.0 across the entire dust core & skirt, tapering to 0.0 outside
-            roi_alpha = cv2.GaussianBlur(roi_expanded.astype(np.float32) / 255.0, (0, 0), feather_sigma)
-            roi_alpha = np.where(roi_core > 0, 1.0, np.clip(roi_alpha * 1.12, 0.0, 1.0))
-
-            # Clean reference ring strictly outside ANY spot's feathered zone
-            roi_outer_dilated = cv2.dilate(roi_expanded, k_ring, iterations=1)
-            roi_ring_mask = (roi_outer_dilated > 0) & (full_mask_expanded[by1:by2, bx1:bx2] == 0)
-            ring_ys, ring_xs = np.where(roi_ring_mask)
-
-            rh, rw = roi_core.shape[:2]
-            yy_grid, xx_grid = np.mgrid[0:rh, 0:rw].astype(np.float32)
-            norm_x = (xx_grid - rw * 0.5) / max(rw * 0.5, 1.0)
-            norm_y = (yy_grid - rh * 0.5) / max(rh * 0.5, 1.0)
-
-            use_plane_detrend = len(ring_xs) >= 16
-            clean_ring_indices = None
-
-            if use_plane_detrend:
-                rx = norm_x[ring_ys, ring_xs]
-                ry = norm_y[ring_ys, ring_xs]
-                g_ring = linear_16bit[by1:by2, bx1:bx2, 1][ring_ys, ring_xs].astype(np.float32)
-                X_lin = np.column_stack([rx, ry, np.ones_like(rx)])
-                c_lin, _, _, _ = np.linalg.lstsq(X_lin, g_ring, rcond=None)
-                res_lin = g_ring - (X_lin @ c_lin)
-                # Symmetric trimming [15, 85] avoids any positive or negative brightness bias!
-                lo_r, hi_r = np.percentile(res_lin, [15, 85])
-                clean_ring_indices = (res_lin >= lo_r) & (res_lin <= hi_r)
-                if int(np.sum(clean_ring_indices)) < 12:
-                    use_plane_detrend = False
-
-            # Because 1st-order background plane is already subtracted, Telea only needs a tight 3.0px
-            # boundary neighborhood (~25x faster than r=18.0) followed by harmonic Gaussian smoothing
-            eff_telea_r = 3.0
-            harm_sigma = max(2.0, min(8.0, min(rw, rh) * 0.10))
-
-            roi_orig_3ch = linear_16bit[by1:by2, bx1:bx2].astype(np.float32)
-
-            if use_plane_detrend and clean_ring_indices is not None:
-                rx_c = norm_x[ring_ys, ring_xs][clean_ring_indices]
-                ry_c = norm_y[ring_ys, ring_xs][clean_ring_indices]
-                X_c = np.column_stack([rx_c, ry_c, np.ones_like(rx_c)])
-                rv_3ch = roi_orig_3ch[ring_ys, ring_xs][clean_ring_indices]  # shape (N, 3)
-                coeffs_3ch, _, _, _ = np.linalg.lstsq(X_c, rv_3ch, rcond=None)  # shape (3, 3)
-            else:
-                coeffs_3ch = None
-
-            grain_std_3ch = None
-            if preserve_grain and np.any(roi_ring_mask):
-                roi_hf_3ch = roi_orig_3ch - cv2.GaussianBlur(roi_orig_3ch, (0, 0), 1.2)
-                ring_hf = np.abs(roi_hf_3ch[roi_ring_mask])
-                grain_std_3ch = np.minimum(np.median(ring_hf, axis=0) * 1.4826, 450.0)
-                noise_base = rng.standard_normal(size=(rh, rw, 3), dtype=np.float32)
-
-            # For large bokeh ROIs (>64px), run Telea harmonic diffusion at 0.5x and upsample
-            # the ultra-smooth residual before adding full-res 16-bit plane + full-res sensor grain
-            use_half_telea = min(rw, rh) > 64
-            if use_half_telea:
-                hw, hh = max(4, rw // 2), max(4, rh // 2)
-                exp_half = cv2.resize(roi_expanded, (hw, hh), interpolation=cv2.INTER_NEAREST)
-
-            for ch in range(3):
-                roi_orig = roi_orig_3ch[:, :, ch]
-
-                if coeffs_3ch is not None:
-                    plane_2d = (
-                        coeffs_3ch[0, ch] * norm_x +
-                        coeffs_3ch[1, ch] * norm_y +
-                        coeffs_3ch[2, ch]
-                    )
-                    detrended = roi_orig - plane_2d
-                    if use_half_telea:
-                        det_half = cv2.resize(detrended, (hw, hh), interpolation=cv2.INTER_AREA)
-                        telea_half = cv2.inpaint(det_half, exp_half, eff_telea_r, cv2.INPAINT_TELEA)
-                        smooth_half = cv2.GaussianBlur(telea_half, (0, 0), max(1.2, harm_sigma * 0.5))
-                        filled_half = 0.45 * telea_half + 0.55 * smooth_half
-                        detrended_filled = cv2.resize(filled_half, (rw, rh), interpolation=cv2.INTER_LINEAR)
-                    else:
-                        detrended_telea = cv2.inpaint(detrended, roi_expanded, eff_telea_r, cv2.INPAINT_TELEA)
-                        detrended_smooth = cv2.GaussianBlur(detrended_telea, (0, 0), harm_sigma)
-                        detrended_filled = 0.45 * detrended_telea + 0.55 * detrended_smooth
-                    roi_healed = plane_2d + detrended_filled
-                else:
-                    roi_telea = cv2.inpaint(roi_orig, roi_expanded, eff_telea_r, cv2.INPAINT_TELEA)
-                    roi_smooth = cv2.GaussianBlur(roi_telea, (0, 0), harm_sigma)
-                    roi_healed = 0.50 * roi_telea + 0.50 * roi_smooth
-
-                if grain_std_3ch is not None and float(grain_std_3ch[ch]) > 1.0:
-                    roi_healed = roi_healed + noise_base[:, :, ch] * float(grain_std_3ch[ch] * 0.85)
-
-                roi_blended = roi_orig * (1.0 - roi_alpha) + roi_healed * roi_alpha
-                inpainted_16bit[by1:by2, bx1:bx2, ch] = np.clip(np.round(roi_blended), 0, 65535).astype(np.uint16)
-
-    np.save(os.path.join(session_dir, "inpainted_16bit.npy"), inpainted_16bit)
-
-    # Incremental ROI update on work_srgb_u8 preview for near-instant preview generation
-    lut_u8 = build_srgb_u8_lut(exposure_scale)
-    work_srgb_path = os.path.join(session_dir, "work_srgb_u8.npy")
-    if os.path.exists(work_srgb_path) and inpainted_pixels > 0:
-        srgb_healed_u8 = np.load(work_srgb_path).copy()
-        for bx1, by1, bx2, by2 in merged_boxes:
-            wx1 = max(0, int(math.floor(bx1 * work_scale)))
-            wy1 = max(0, int(math.floor(by1 * work_scale)))
-            wx2 = min(work_w, int(math.ceil(bx2 * work_scale)))
-            wy2 = min(work_h, int(math.ceil(by2 * work_scale)))
-            if wx2 <= wx1 or wy2 <= wy1:
+            sbox = _spot_full_bbox(sp, work_scale, restore_pad, full_w, full_h)
+            if any(_boxes_overlap(sbox, rbox) for rbox in restored_boxes):
+                added_spot_ids.add(sid)
+        for stid, (_, st) in curr_strokes_map.items():
+            if stid in added_stroke_ids:
                 continue
-            patch_16 = inpainted_16bit[by1:by2, bx1:bx2]
-            if (by2 - by1, bx2 - bx1) != (wy2 - wy1, wx2 - wx1):
-                patch_16 = cv2.resize(patch_16, (wx2 - wx1, wy2 - wy1), interpolation=cv2.INTER_AREA)
-            srgb_healed_u8[wy1:wy2, wx1:wx2] = lut_u8[patch_16]
-    else:
+            stbox = _stroke_full_bbox(st, restore_pad, full_w, full_h)
+            if any(_boxes_overlap(stbox, rbox) for rbox in restored_boxes):
+                added_stroke_ids.add(stid)
+
+    delta_spots = [curr_spots_map[sid][1] for sid in added_spot_ids]
+    delta_strokes = [curr_strokes_map[stid][1] for stid in added_stroke_ids]
+
+    merged_boxes: List[Tuple[int, int, int, int]] = []
+
+    if (delta_spots or delta_strokes) and inpainted_pixels > 0:
+        delta_work_mask = build_combined_mask(work_h, work_w, work_scale, delta_spots, delta_strokes)
         if (full_h, full_w) != (work_h, work_w):
-            work_inpainted_16 = cv2.resize(inpainted_16bit, (work_w, work_h), interpolation=cv2.INTER_AREA)
+            delta_full_mask = cv2.resize(delta_work_mask, (full_w, full_h), interpolation=cv2.INTER_NEAREST)
         else:
-            work_inpainted_16 = inpainted_16bit
-        srgb_healed_u8 = lut_u8[work_inpainted_16]
+            delta_full_mask = delta_work_mask
 
-    healed_bgr = cv2.cvtColor(srgb_healed_u8, cv2.COLOR_RGB2BGR)
+        delta_mask_core = cv2.dilate(delta_full_mask, k_skirt, iterations=1)
+
+        if int(np.count_nonzero(delta_mask_core)) > 0:
+            rng = np.random.default_rng(42)
+            k_feather = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (feather_px * 2 + 1, feather_px * 2 + 1))
+            k_ring = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring_width_px * 2 + 1, ring_width_px * 2 + 1))
+
+            full_mask_expanded = cv2.dilate(full_mask_core, k_feather, iterations=1)
+            delta_mask_expanded = cv2.dilate(delta_mask_core, k_feather, iterations=1)
+            num_labels, labels_exp, stats, _ = cv2.connectedComponentsWithStats(delta_mask_expanded, connectivity=8)
+
+            for i in range(1, num_labels):
+                x = int(stats[i, cv2.CC_STAT_LEFT])
+                y = int(stats[i, cv2.CC_STAT_TOP])
+                w = int(stats[i, cv2.CC_STAT_WIDTH])
+                h = int(stats[i, cv2.CC_STAT_HEIGHT])
+                bx1 = max(0, x - ring_pad)
+                by1 = max(0, y - ring_pad)
+                bx2 = min(full_w, x + w + ring_pad)
+                by2 = min(full_h, y + h + ring_pad)
+                merged_boxes.append((bx1, by1, bx2, by2))
+
+                roi_expanded = ((labels_exp[by1:by2, bx1:bx2] == i).astype(np.uint8)) * 255
+                roi_core = np.where(roi_expanded > 0, delta_mask_core[by1:by2, bx1:bx2], 0)
+                if np.count_nonzero(roi_core) == 0:
+                    continue
+
+                roi_alpha = cv2.GaussianBlur(roi_expanded.astype(np.float32) / 255.0, (0, 0), feather_sigma)
+                roi_alpha = np.where(roi_core > 0, 1.0, np.clip(roi_alpha * 1.12, 0.0, 1.0))
+
+                roi_outer_dilated = cv2.dilate(roi_expanded, k_ring, iterations=1)
+                roi_ring_mask = (roi_outer_dilated > 0) & (full_mask_expanded[by1:by2, bx1:bx2] == 0)
+                ring_ys, ring_xs = np.where(roi_ring_mask)
+
+                rh, rw = roi_core.shape[:2]
+                yy_grid, xx_grid = np.mgrid[0:rh, 0:rw].astype(np.float32)
+                norm_x = (xx_grid - rw * 0.5) / max(rw * 0.5, 1.0)
+                norm_y = (yy_grid - rh * 0.5) / max(rh * 0.5, 1.0)
+
+                use_plane_detrend = len(ring_xs) >= 16
+                clean_ring_indices = None
+
+                if use_plane_detrend:
+                    rx = norm_x[ring_ys, ring_xs]
+                    ry = norm_y[ring_ys, ring_xs]
+                    g_ring = linear_16bit[by1:by2, bx1:bx2, 1][ring_ys, ring_xs].astype(np.float32)
+                    X_lin = np.column_stack([rx, ry, np.ones_like(rx)])
+                    c_lin, _, _, _ = np.linalg.lstsq(X_lin, g_ring, rcond=None)
+                    res_lin = g_ring - (X_lin @ c_lin)
+                    lo_r, hi_r = np.percentile(res_lin, [15, 85])
+                    clean_ring_indices = (res_lin >= lo_r) & (res_lin <= hi_r)
+                    if int(np.sum(clean_ring_indices)) < 12:
+                        use_plane_detrend = False
+
+                eff_telea_r = 3.0
+                harm_sigma = max(2.0, min(8.0, min(rw, rh) * 0.10))
+
+                roi_orig_3ch = linear_16bit[by1:by2, bx1:bx2].astype(np.float32)
+                roi_curr_3ch = checkpoint_16bit[by1:by2, bx1:bx2].astype(np.float32)
+
+                if use_plane_detrend and clean_ring_indices is not None:
+                    rx_c = norm_x[ring_ys, ring_xs][clean_ring_indices]
+                    ry_c = norm_y[ring_ys, ring_xs][clean_ring_indices]
+                    X_c = np.column_stack([rx_c, ry_c, np.ones_like(rx_c)])
+                    rv_3ch = roi_orig_3ch[ring_ys, ring_xs][clean_ring_indices]
+                    coeffs_3ch, _, _, _ = np.linalg.lstsq(X_c, rv_3ch, rcond=None)
+                else:
+                    coeffs_3ch = None
+
+                grain_std_3ch = None
+                if preserve_grain and np.any(roi_ring_mask):
+                    roi_hf_3ch = roi_orig_3ch - cv2.GaussianBlur(roi_orig_3ch, (0, 0), 1.2)
+                    ring_hf = np.abs(roi_hf_3ch[roi_ring_mask])
+                    grain_std_3ch = np.minimum(np.median(ring_hf, axis=0) * 1.4826, 450.0)
+                    noise_base = rng.standard_normal(size=(rh, rw, 3), dtype=np.float32)
+
+                use_half_telea = min(rw, rh) > 64
+                if use_half_telea:
+                    hw, hh = max(4, rw // 2), max(4, rh // 2)
+                    exp_half = cv2.resize(roi_expanded, (hw, hh), interpolation=cv2.INTER_NEAREST)
+
+                for ch in range(3):
+                    roi_orig = roi_orig_3ch[:, :, ch]
+                    roi_base = roi_curr_3ch[:, :, ch]
+
+                    if coeffs_3ch is not None:
+                        plane_2d = (
+                            coeffs_3ch[0, ch] * norm_x +
+                            coeffs_3ch[1, ch] * norm_y +
+                            coeffs_3ch[2, ch]
+                        )
+                        detrended = roi_orig - plane_2d
+                        if use_half_telea:
+                            det_half = cv2.resize(detrended, (hw, hh), interpolation=cv2.INTER_AREA)
+                            telea_half = cv2.inpaint(det_half, exp_half, eff_telea_r, cv2.INPAINT_TELEA)
+                            smooth_half = cv2.GaussianBlur(telea_half, (0, 0), max(1.2, harm_sigma * 0.5))
+                            filled_half = 0.45 * telea_half + 0.55 * smooth_half
+                            detrended_filled = cv2.resize(filled_half, (rw, rh), interpolation=cv2.INTER_LINEAR)
+                        else:
+                            detrended_telea = cv2.inpaint(detrended, roi_expanded, eff_telea_r, cv2.INPAINT_TELEA)
+                            detrended_smooth = cv2.GaussianBlur(detrended_telea, (0, 0), harm_sigma)
+                            detrended_filled = 0.45 * detrended_telea + 0.55 * detrended_smooth
+                        roi_healed = plane_2d + detrended_filled
+                    else:
+                        roi_telea = cv2.inpaint(roi_orig, roi_expanded, eff_telea_r, cv2.INPAINT_TELEA)
+                        roi_smooth = cv2.GaussianBlur(roi_telea, (0, 0), harm_sigma)
+                        roi_healed = 0.50 * roi_telea + 0.50 * roi_smooth
+
+                    if grain_std_3ch is not None and float(grain_std_3ch[ch]) > 1.0:
+                        roi_healed = roi_healed + noise_base[:, :, ch] * float(grain_std_3ch[ch] * 0.85)
+
+                    roi_blended = roi_base * (1.0 - roi_alpha) + roi_healed * roi_alpha
+                    checkpoint_16bit[by1:by2, bx1:bx2, ch] = np.clip(np.round(roi_blended), 0, 65535).astype(np.uint16)
+
+    # Update preview checkpoint only on modified boxes
+    lut_u8 = build_srgb_u8_lut(exposure_scale) if not is_input_16bit else None
+    for bx1, by1, bx2, by2 in merged_boxes:
+        wx1 = max(0, int(math.floor(bx1 * work_scale)))
+        wy1 = max(0, int(math.floor(by1 * work_scale)))
+        wx2 = min(work_w, int(math.ceil(bx2 * work_scale)))
+        wy2 = min(work_h, int(math.ceil(by2 * work_scale)))
+        if wx2 <= wx1 or wy2 <= wy1:
+            continue
+        patch_16 = checkpoint_16bit[by1:by2, bx1:bx2]
+        if (by2 - by1, bx2 - bx1) != (wy2 - wy1, wx2 - wx1):
+            patch_16 = cv2.resize(patch_16, (wx2 - wx1, wy2 - wy1), interpolation=cv2.INTER_AREA)
+        if is_input_16bit:
+            checkpoint_work_u8[wy1:wy2, wx1:wx2] = np.clip(np.round(patch_16.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+        else:
+            checkpoint_work_u8[wy1:wy2, wx1:wx2] = lut_u8[patch_16]
+
+    np.save(os.path.join(session_dir, "inpainted_16bit.npy"), checkpoint_16bit)
+    healed_bgr = cv2.cvtColor(checkpoint_work_u8, cv2.COLOR_RGB2BGR)
     cv2.imwrite(os.path.join(session_dir, "preview_inpainted.jpg"), healed_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
 
     result_info = {
@@ -1172,11 +1381,18 @@ def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, 
         "inpaintedPixels": inpainted_pixels,
         "inpaintedAreaPct": round((inpainted_pixels / float(full_h * full_w)) * 100.0, 4),
         "bitDepth": "16-bit Linear RGB (uint16, 0–65535)",
-        "inpaintMethod": "Plane-Detrended 16-bit Harmonic Telea + Outward Feathering",
+        "inpaintMethod": "Incremental Checkpoint + Plane-Detrended 16-bit Harmonic Telea",
         "inpaintRadius": inpaint_radius_full,
         "fullWidth": full_w,
-        "fullHeight": full_h
+        "fullHeight": full_h,
+        "fromCache": False,
+        "incrementalRois": len(merged_boxes) + len(restored_boxes),
     }
+
+    cache["baked_spots"] = curr_spots_map
+    cache["baked_strokes"] = curr_strokes_map
+    cache["baked_params"] = current_params_sig
+    cache["last_inpaint_result"] = result_info
 
     with open(os.path.join(session_dir, "inpaint_result.json"), "w", encoding="utf-8") as f:
         json.dump(result_info, f, ensure_ascii=False, indent=2)
@@ -1191,13 +1407,10 @@ def write_linear_dng(
     meta: Dict[str, Any]
 ) -> None:
     """
-    Writes a standard Dual-IFD DNG 1.4 file compatible with BOTH:
-      1. Mobile & OS Galleries (Samsung Gallery, Android MediaStore, iOS Photos, Windows/macOS):
-         IFD0 is an 8-bit RGB preview image (NewSubfileType = 1, Photometric = 2 RGB) with DNG 1.4 tags.
-      2. Professional RAW Decoders & Editors (LibRaw / rawpy, Adobe Lightroom, Camera Raw, Darktable):
-         SubIFD0 (linked via Tag 330 SubIFDs) contains the full-resolution lossless 16-bit
-         (uint16) Linear Raw RGB image (NewSubfileType = 0, Photometric = 34892 LinearRaw)
-         paired with the exact D65 XYZ->sRGB ColorMatrix1.
+    Writes a zero-DR-loss Dual-IFD DNG 1.4 file:
+      - SubIFD0 stores the unclipped 16-bit Linear RGB sensor array (`0..65535`) with zero exposure multiplication.
+      - IFD0 stores DNG Tag 50730 (`BaselineExposure`) so Lightroom/Camera Raw renders at the calibrated brightness
+        while retaining 100% of highlight headroom.
     """
     exif_info = meta.get("exif", {})
     raw_make = str(exif_info.get("make", "Panasonic"))
@@ -1206,13 +1419,15 @@ def write_linear_dng(
     model_str = raw_model.encode("ascii", errors="ignore").decode("ascii").strip() or "Camera Sensor"
     unique_model = f"{make_str} {model_str}".strip()
 
-    # DNG Spec Tag 50721 (ColorMatrix1) maps CIE XYZ (D65) -> Camera Linear RGB (sRGB primaries)
     xyz_to_srgb_matrix = (
         32405, 10000, -15371, 10000,  -4985, 10000,
         -9693, 10000,  18760, 10000,    416, 10000,
           556, 10000,  -2040, 10000,  10572, 10000
     )
     as_shot_neutral = (10000, 10000, 10000, 10000, 10000, 10000)
+
+    exposure_scale = float(meta.get("exposureScale", 1.0))
+    baseline_ev_num = int(round(math.log2(max(exposure_scale, 0.25)) * 100.0))
 
     ifd0_tags = [
         (271, 's', 0, make_str, True),                        # Make
@@ -1223,6 +1438,7 @@ def write_linear_dng(
         (50708, 's', 0, unique_model, True),                  # UniqueCameraModel
         (50721, '2i', 9, xyz_to_srgb_matrix, True),           # ColorMatrix1 (XYZ -> Linear sRGB)
         (50728, '2I', 3, as_shot_neutral, True),              # AsShotNeutral
+        (50730, '2i', 1, (baseline_ev_num, 100), True),       # BaselineExposure (EV without clipping pixels!)
         (50740, 'H', 1, 21, True),                            # CalibrationIlluminant1 = D65
     ]
 
@@ -1231,7 +1447,6 @@ def write_linear_dng(
         (50717, 'I', 3, (65535, 65535, 65535), True),         # WhiteLevel
     ]
 
-    # Prepare high-resolution 8-bit preview for IFD0 (up to 2560px long edge so mobile galleries render instantly)
     ph, pw = preview_srgb_u8.shape[:2]
     max_prev_dim = 2560
     if max(ph, pw) > max_prev_dim:
@@ -1246,7 +1461,6 @@ def write_linear_dng(
 
     try:
         with tifffile.TiffWriter(output_path, bigtiff=False) as tif:
-            # IFD0: 8-bit sRGB Reduced-Resolution Preview (subfiletype=1) + pointer to 1 SubIFD
             tif.write(
                 prev_u8,
                 photometric='rgb',
@@ -1257,7 +1471,6 @@ def write_linear_dng(
                 software="SensorClean Pro 16-bit DNG Engine",
                 extratags=ifd0_tags
             )
-            # SubIFD0: Full-resolution 16-bit LinearRaw image (subfiletype=0, photometric=34892 LinearRaw)
             tif.write(
                 linear_rgb_16bit,
                 photometric=34892,
@@ -1288,6 +1501,8 @@ def export_healed_image(
 
     if preloaded_rgb_16bit is not None:
         rgb_16bit = preloaded_rgb_16bit
+    elif session_dir in _SESSION_CACHE and _SESSION_CACHE[session_dir].get("checkpoint_16bit") is not None:
+        rgb_16bit = _SESSION_CACHE[session_dir]["checkpoint_16bit"]
     else:
         inpainted_path = os.path.join(session_dir, "inpainted_16bit.npy")
         if os.path.exists(inpainted_path):
@@ -1297,21 +1512,23 @@ def export_healed_image(
 
     fmt = export_format.lower()
     exposure_scale = float(meta.get("exposureScale", 1.0))
+    is_input_16bit = bool(meta.get("isInput16Bit", False))
 
     if fmt == "dng":
-        # Exposure-calibrated 16-bit linear values for SubIFD0 (Photometric = 34892 LinearRaw)
-        # 1.12x factor compensates for BT.709 vs sRGB toe in standard DNG raw developers
-        lin_exposed_16 = np.clip(
-            np.round(rgb_16bit.astype(np.float32) * (exposure_scale * 1.12)),
-            0,
-            65535
-        ).astype(np.uint16)
-        srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
-        write_linear_dng(lin_exposed_16, srgb_u8, output_path, meta)
+        # Zero-DR-Loss DNG: write unclipped 16-bit linear values directly; BaselineExposure tag handles preview brightness
+        if is_input_16bit:
+            srgb_u8 = np.clip(np.round(rgb_16bit.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+        else:
+            srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
+        write_linear_dng(rgb_16bit, srgb_u8, output_path, meta)
         mime_type = "image/x-adobe-dng"
         ext = "dng"
     elif fmt == "tiff16":
-        srgb_16bit, _ = linear_16bit_to_srgb_16bit(rgb_16bit, exposure_scale=exposure_scale)
+        if is_input_16bit:
+            srgb_16bit = rgb_16bit
+        else:
+            # Use unclipped exposure_scale=1.0 for 16-bit TIFF so 100% of highlight DR (0..65535) is preserved
+            srgb_16bit, _ = linear_16bit_to_srgb_16bit(rgb_16bit, exposure_scale=1.0)
         tifffile.imwrite(
             output_path,
             srgb_16bit,
@@ -1323,13 +1540,19 @@ def export_healed_image(
         mime_type = "image/tiff"
         ext = "tiff"
     elif fmt == "png":
-        srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
+        if is_input_16bit:
+            srgb_u8 = np.clip(np.round(rgb_16bit.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+        else:
+            srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
         bgr_u8 = cv2.cvtColor(srgb_u8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(output_path, bgr_u8)
         mime_type = "image/png"
         ext = "png"
     else:
-        srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
+        if is_input_16bit:
+            srgb_u8 = np.clip(np.round(rgb_16bit.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+        else:
+            srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
         bgr_u8 = cv2.cvtColor(srgb_u8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(output_path, bgr_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 98])
         mime_type = "image/jpeg"

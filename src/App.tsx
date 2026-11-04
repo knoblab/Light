@@ -120,9 +120,10 @@ export function App() {
   // Canvas & Tool UI state
   const [showDustOverlay, setShowDustOverlay] = useState<boolean>(true);
   const [overlayMode, setOverlayMode] = useState<OverlayMode>('red-circle');
-  const [interactionTool, setInteractionTool] = useState<InteractionTool>('inspect');
+  const [interactionTool, setInteractionTool] = useState<InteractionTool>('pen-add');
   const [brushRadius, setBrushRadius] = useState<number>(28);
   const [comparisonMode, setComparisonMode] = useState<ViewComparisonMode>('working');
+  const [isIncrementalSyncing, setIsIncrementalSyncing] = useState<boolean>(false);
 
   // Desktop Inspector & Export Menu state
   const [isRightDockOpen, setIsRightDockOpen] = useState<boolean>(true);
@@ -225,6 +226,9 @@ export function App() {
     setUndoStack((prev) => prev.slice(0, -1));
     setRedoStack((prev) => [...prev, currentSnap]);
     applySnapshot(prevSnap);
+    if (sessionId) {
+      void triggerIncrementalCheckpointHeal(prevSnap.spots, prevSnap.manualStrokes);
+    }
   };
 
   const handleRedo = () => {
@@ -234,6 +238,61 @@ export function App() {
     setRedoStack((prev) => prev.slice(0, -1));
     setUndoStack((prev) => [...prev, currentSnap]);
     applySnapshot(nextSnap);
+    if (sessionId) {
+      void triggerIncrementalCheckpointHeal(nextSnap.spots, nextSnap.manualStrokes);
+    }
+  };
+
+  const triggerIncrementalCheckpointHeal = async (
+    nextSpots: DetectedDustSpot[],
+    nextStrokes: ManualBrushStroke[],
+    overrideRadius?: number,
+    overrideGrain?: boolean
+  ) => {
+    if (!sessionId) return;
+    setIsIncrementalSyncing(true);
+    try {
+      const data = await localSensorEngine.inpaint(
+        sessionId,
+        nextSpots,
+        nextStrokes,
+        overrideRadius ?? params.inpaintRadius,
+        overrideGrain ?? params.preserveGrain
+      );
+      setInpaintResult(data.inpaintResult);
+      setUrls((prev) =>
+        prev
+          ? {
+              ...prev,
+              previewInpainted: data.urls.previewInpainted,
+              maskFinal: data.urls.maskFinal,
+            }
+          : null
+      );
+      if (studioMode === 'sequence') {
+        setSequenceItems((prev) =>
+          prev.map((item, idx) =>
+            idx === activeSequenceIndex
+              ? {
+                  ...item,
+                  spots: nextSpots,
+                  manualStrokes: nextStrokes,
+                  inpaintResult: data.inpaintResult,
+                  urls: {
+                    ...item.urls,
+                    previewInpainted: data.urls.previewInpainted,
+                    maskFinal: data.urls.maskFinal,
+                  },
+                }
+              : item
+          )
+        );
+      }
+    } catch (err: any) {
+      console.error('Incremental checkpoint sync failed:', err);
+    } finally {
+      setIsIncrementalSyncing(false);
+    }
   };
 
   const handleRevertInpainting = () => {
@@ -360,11 +419,34 @@ export function App() {
           clusters: data.clusters || [],
         });
         const curItem = updatedItems[activeSequenceIndex];
-        if (curItem) setSpots(curItem.spots);
+        if (curItem) {
+          setSpots(curItem.spots);
+          if (curItem.spots.length > 0 || manualStrokes.length > 0) {
+            setProcessingLabel('임시 저장본 생성 및 먼지 복원 중...');
+            const healData = await localSensorEngine.inpaint(
+              curItem.sessionId,
+              curItem.spots,
+              manualStrokes,
+              nextParams.inpaintRadius,
+              nextParams.preserveGrain,
+              handleProgress
+            );
+            setInpaintResult(healData.inpaintResult);
+            setUrls((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    previewInpainted: healData.urls.previewInpainted,
+                    maskFinal: healData.urls.maskFinal,
+                  }
+                : null
+            );
+          }
+        }
       } else {
         const data = await localSensorEngine.detect(sessionId, nextParams, handleProgress);
-
-        setSpots(data.detection.spots || []);
+        const detectedSpots = data.detection.spots || [];
+        setSpots(detectedSpots);
         setUrls((prev) =>
           prev
             ? {
@@ -374,6 +456,31 @@ export function App() {
               }
             : null
         );
+
+        // Immediately generate initial temporary checkpoint so export and pen edits never repeat full inpainting
+        if (detectedSpots.length > 0 || manualStrokes.length > 0) {
+          setProcessingLabel('임시 저장본 생성 및 먼지 복원 중...');
+          const healData = await localSensorEngine.inpaint(
+            sessionId,
+            detectedSpots,
+            manualStrokes,
+            nextParams.inpaintRadius,
+            nextParams.preserveGrain,
+            handleProgress
+          );
+          setInpaintResult(healData.inpaintResult);
+          setUrls((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  vizBwEdge: data.urls.vizBwEdge,
+                  maskAuto: data.urls.maskAuto,
+                  previewInpainted: healData.urls.previewInpainted,
+                  maskFinal: healData.urls.maskFinal,
+                }
+              : null
+          );
+        }
       }
       setSelectedSpotId(null);
       setShowDustOverlay(true);
@@ -386,26 +493,51 @@ export function App() {
     }
   };
 
-  const handleBatchDeselectSpots = (spotIdsToDeselect: string[]) => {
-    if (spotIdsToDeselect.length === 0) return;
-    const idSet = new Set(spotIdsToDeselect);
-    setSpots((prev) =>
-      prev.map((s) => (idSet.has(s.id) ? { ...s, enabled: false } : s))
-    );
-    if (studioMode === 'sequence') {
-      setSequenceItems((prev) =>
-        prev.map((item, idx) =>
-          idx === activeSequenceIndex
-            ? {
-                ...item,
-                spots: item.spots.map((s) =>
-                  idSet.has(s.id) ? { ...s, enabled: false } : s
-                ),
-              }
-            : item
-        )
+  const handlePenAddCommit = (action: {
+    newSpot?: DetectedDustSpot;
+    reenableSpotId?: string;
+    newStroke?: ManualBrushStroke;
+  }) => {
+    pushHistorySnapshot();
+    let nextSpots = spots;
+    let nextStrokes = manualStrokes;
+
+    if (action.reenableSpotId) {
+      nextSpots = spots.map((s) =>
+        s.id === action.reenableSpotId ? { ...s, enabled: true } : s
       );
+      setSpots(nextSpots);
+    } else if (action.newSpot) {
+      nextSpots = [...spots, action.newSpot];
+      setSpots(nextSpots);
     }
+
+    if (action.newStroke) {
+      nextStrokes = [...manualStrokes, action.newStroke];
+      setManualStrokes(nextStrokes);
+    }
+
+    void triggerIncrementalCheckpointHeal(nextSpots, nextStrokes);
+  };
+
+  const handlePenRemoveCommit = (action: {
+    disableSpotIds: string[];
+    deleteManualSpotIds: string[];
+    updatedStrokes: ManualBrushStroke[];
+  }) => {
+    pushHistorySnapshot();
+    const disableSet = new Set(action.disableSpotIds);
+    const deleteSet = new Set(action.deleteManualSpotIds);
+
+    const nextSpots = spots
+      .filter((s) => !deleteSet.has(s.id))
+      .map((s) => (disableSet.has(s.id) ? { ...s, enabled: false } : s));
+
+    const nextStrokes = action.updatedStrokes;
+
+    setSpots(nextSpots);
+    setManualStrokes(nextStrokes);
+    void triggerIncrementalCheckpointHeal(nextSpots, nextStrokes);
   };
 
   const handleMultiUploadFiles = async (fileList: FileList | File[]) => {
@@ -583,40 +715,18 @@ export function App() {
 
   const handleToggleSpot = (spotId: string) => {
     pushHistorySnapshot();
-    setSpots((prev) =>
-      prev.map((s) => (s.id === spotId ? { ...s, enabled: !s.enabled } : s))
+    const nextSpots = spots.map((s) =>
+      s.id === spotId ? { ...s, enabled: !s.enabled } : s
     );
-    if (studioMode === 'sequence') {
-      setSequenceItems((prev) =>
-        prev.map((item, idx) =>
-          idx === activeSequenceIndex
-            ? {
-                ...item,
-                spots: item.spots.map((s) =>
-                  s.id === spotId ? { ...s, enabled: !s.enabled } : s
-                ),
-              }
-            : item
-        )
-      );
-    }
+    setSpots(nextSpots);
+    void triggerIncrementalCheckpointHeal(nextSpots, manualStrokes);
   };
 
   const handleToggleAllSpots = (enableAll: boolean) => {
     pushHistorySnapshot();
-    setSpots((prev) => prev.map((s) => ({ ...s, enabled: enableAll })));
-    if (studioMode === 'sequence') {
-      setSequenceItems((prev) =>
-        prev.map((item, idx) =>
-          idx === activeSequenceIndex
-            ? {
-                ...item,
-                spots: item.spots.map((s) => ({ ...s, enabled: enableAll })),
-              }
-            : item
-        )
-      );
-    }
+    const nextSpots = spots.map((s) => ({ ...s, enabled: enableAll }));
+    setSpots(nextSpots);
+    void triggerIncrementalCheckpointHeal(nextSpots, manualStrokes);
   };
 
   // Step 3: Apply inpainting
@@ -1026,18 +1136,9 @@ export function App() {
             spots={spots}
             selectedSpotId={selectedSpotId}
             onSelectSpot={setSelectedSpotId}
-            onToggleSpot={handleToggleSpot}
             manualStrokes={manualStrokes}
-            onAddManualStroke={(st) => {
-              pushHistorySnapshot();
-              setManualStrokes((prev) => [...prev, st]);
-            }}
-            onClearManualStrokes={() => {
-              if (manualStrokes.length > 0) {
-                pushHistorySnapshot();
-                setManualStrokes([]);
-              }
-            }}
+            onPenAddCommit={handlePenAddCommit}
+            onPenRemoveCommit={handlePenRemoveCommit}
             showDustOverlay={showDustOverlay}
             onToggleDustOverlay={setShowDustOverlay}
             overlayMode={overlayMode}
@@ -1050,12 +1151,11 @@ export function App() {
             onChangeComparisonMode={setComparisonMode}
             hasInpaintedResult={Boolean(inpaintResult && urls?.previewInpainted)}
             isProcessing={isProcessing}
+            isIncrementalSyncing={isIncrementalSyncing}
             processingLabel={processingLabel}
             progressPercent={progressPercent}
             progressInfo={progressInfo}
             onUploadFile={handleUploadFile}
-            onBeginHistoryBatch={pushHistorySnapshot}
-            onBatchDeselectSpots={handleBatchDeselectSpots}
             onUndo={handleUndo}
             onRedo={handleRedo}
             canUndo={undoStack.length > 0 && !isProcessing}
@@ -1611,70 +1711,44 @@ export function App() {
             </button>
           </div>
 
-          {/* Mobile Tab 1: Tools */}
+          {/* Mobile Tab 1: Tools (Simplified 2 Pens) */}
           {mobileTab === 'tools' && (
             <div className="space-y-2.5">
-              <div className="grid grid-cols-4 gap-1.5">
+              <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setInteractionTool('inspect')}
+                  onClick={() => setInteractionTool('pen-add')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-                    interactionTool === 'inspect'
+                    interactionTool === 'pen-add'
                       ? 'bg-[#556042] text-white'
                       : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
-                  <MousePointer className="w-4 h-4" />
-                  <span>선택</span>
+                  <Plus className="w-4 h-4" />
+                  <span>스팟 추가 펜</span>
                 </button>
                 <button
                   type="button"
-                  onClick={() => setInteractionTool('deselect-brush')}
+                  onClick={() => setInteractionTool('pen-remove')}
                   className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-                    interactionTool === 'deselect-brush'
+                    interactionTool === 'pen-remove'
                       ? 'bg-[#556042] text-white'
                       : 'bg-[#2B2B2E] text-[#C2C1BB]'
                   }`}
                 >
                   <Eraser className="w-4 h-4" />
-                  <span>지우개브러시</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInteractionTool('brush-add')}
-                  className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-                    interactionTool === 'brush-add'
-                      ? 'bg-[#556042] text-white'
-                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
-                  }`}
-                >
-                  <Paintbrush className="w-4 h-4" />
-                  <span>복원브러시</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setInteractionTool('brush-erase')}
-                  className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
-                    interactionTool === 'brush-erase'
-                      ? 'bg-[#556042] text-white'
-                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
-                  }`}
-                >
-                  <RotateCcw className="w-4 h-4" />
-                  <span>마스크지우개</span>
+                  <span>스팟 제거 펜</span>
                 </button>
               </div>
 
-              {interactionTool !== 'inspect' && (
-                <LrSlider
-                  label="브러시 반경"
-                  value={brushRadius}
-                  displayValue={`${brushRadius}px`}
-                  min={4}
-                  max={120}
-                  onChange={setBrushRadius}
-                />
-              )}
+              <LrSlider
+                label="펜 반경"
+                value={brushRadius}
+                displayValue={`${brushRadius}px`}
+                min={4}
+                max={120}
+                onChange={setBrushRadius}
+              />
 
               <div className="grid grid-cols-2 gap-2 pt-1">
                 <button

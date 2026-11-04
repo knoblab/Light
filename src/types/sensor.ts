@@ -20,7 +20,7 @@ export interface DetailedProgressInfo {
 
 export type OverlayMode = 'red-circle' | 'bw-edge';
 
-export type InteractionTool = 'inspect' | 'deselect-brush' | 'brush-add' | 'brush-erase';
+export type InteractionTool = 'pen-add' | 'pen-remove';
 
 export type ViewComparisonMode = 'working' | 'split' | 'original-only' | 'healed-only';
 
@@ -100,6 +100,7 @@ export interface SessionMetadata {
   originalFileName: string;
   extension: string;
   isRaw: boolean;
+  isLinear16?: boolean;
   fullWidth: number;
   fullHeight: number;
   workWidth: number;
@@ -144,6 +145,8 @@ export interface InpaintResult {
   inpaintRadius: number;
   fullWidth: number;
   fullHeight: number;
+  fromCache?: boolean;
+  incrementalRois?: number;
 }
 
 export interface SessionUrls {

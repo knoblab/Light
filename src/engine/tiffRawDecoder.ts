@@ -10,6 +10,7 @@ export interface DecodedImagePayload {
   lut16ToOrig8G: Uint8Array; // 65536-entry LUT mapping linear16 G -> origRgb8 G
   lut16ToOrig8B: Uint8Array; // 65536-entry LUT mapping linear16 B -> origRgb8 B
   isRaw: boolean;
+  isLinear16?: boolean;
   extension: string;
   exposureScale: number;
   detectedColorSpace: ColorSpaceId;
@@ -998,7 +999,7 @@ export function parseFujifilmRaf(
  */
 function decodeWithUtifFallback(
   buffer: ArrayBuffer
-): { width: number; height: number; rgb8: Uint8Array } | null {
+): { width: number; height: number; rgb16?: Uint16Array; rgb8?: Uint8Array } | null {
   try {
     const ifds = UTIF.decode(buffer);
     if (!ifds || ifds.length === 0) return null;
@@ -1027,9 +1028,37 @@ function decodeWithUtifFallback(
         const w = candidate.width || 0;
         const h = candidate.height || 0;
         if (w <= 0 || h <= 0 || !candidate.data) continue;
-        const rgba = UTIF.toRGBA8(candidate);
-        if (!rgba || rgba.length < w * h * 4) continue;
         const numPixels = w * h;
+        const bps = candidate.t258?.[0] || 8;
+        const spp = candidate.t277?.[0] || 3;
+
+        // Preserve 100% 16-bit dynamic range when UTIF decoded a 16-bit IFD!
+        if (bps === 16 && candidate.data.byteLength >= numPixels * spp * 2) {
+          const view16 = new DataView(
+            candidate.data.buffer,
+            candidate.data.byteOffset,
+            candidate.data.byteLength
+          );
+          const isLE = Boolean(candidate.isLE ?? true);
+          const rgb16 = new Uint16Array(numPixels * 3);
+          for (let p = 0; p < numPixels; p++) {
+            const base = p * spp * 2;
+            if (spp === 1) {
+              const v = view16.getUint16(base, isLE);
+              rgb16[p * 3] = v;
+              rgb16[p * 3 + 1] = v;
+              rgb16[p * 3 + 2] = v;
+            } else {
+              rgb16[p * 3] = view16.getUint16(base, isLE);
+              rgb16[p * 3 + 1] = view16.getUint16(base + 2, isLE);
+              rgb16[p * 3 + 2] = view16.getUint16(base + 4, isLE);
+            }
+          }
+          return { width: w, height: h, rgb16 };
+        }
+
+        const rgba = UTIF.toRGBA8(candidate);
+        if (!rgba || rgba.length < numPixels * 4) continue;
         const rgb8 = new Uint8Array(numPixels * 3);
         for (let i = 0, j = 0; i < numPixels * 4; i += 4, j += 3) {
           rgb8[j] = rgba[i];
@@ -1646,7 +1675,31 @@ export async function decodeImageFileLocal(
     }
   }
 
-  // Case 1: Uncompressed 16-bit RGB data available (e.g. 16-bit TIFF or Linear DNG SubIFD0)
+  // If this is a compressed TIFF or compressed DNG where uncompressed strip decoding wasn't applicable,
+  // try UTIF full-resolution decoder if it yields higher resolution than any embedded preview JPEG.
+  if (littleEndian !== null && !uncompressed16 && !uncompressed8) {
+    const utifDecoded = decodeWithUtifFallback(buffer);
+    if (
+      utifDecoded &&
+      utifDecoded.width * utifDecoded.height > bestEmbeddedJpegPixels
+    ) {
+      if (utifDecoded.rgb16) {
+        uncompressed16 = {
+          width: utifDecoded.width,
+          height: utifDecoded.height,
+          rgb16: utifDecoded.rgb16,
+        };
+      } else if (utifDecoded.rgb8) {
+        uncompressed8 = {
+          width: utifDecoded.width,
+          height: utifDecoded.height,
+          rgb8: utifDecoded.rgb8,
+        };
+      }
+    }
+  }
+
+  // Case 1: Uncompressed or UTIF-decoded 16-bit RGB data available (e.g. 16-bit TIFF or Linear DNG SubIFD0)
   if (uncompressed16) {
     let refPreview = uncompressed8;
     if (!refPreview && bestEmbeddedJpegBytes) {
@@ -1673,24 +1726,13 @@ export async function decodeImageFileLocal(
       lut16ToOrig8G: lutG,
       lut16ToOrig8B: lutB,
       isRaw,
+      isLinear16: isRaw || exposureScale > 1.05,
       extension: ext.toUpperCase(),
       exposureScale,
       detectedColorSpace,
       rawIccProfileBytes: detectedIccBytes,
       exif,
     };
-  }
-
-  // If this is a compressed TIFF or compressed DNG where uncompressed strip decoding wasn't applicable,
-  // try UTIF full-resolution decoder if it yields higher resolution than any embedded preview JPEG.
-  if (littleEndian !== null && !uncompressed8) {
-    const utifDecoded = decodeWithUtifFallback(buffer);
-    if (
-      utifDecoded &&
-      utifDecoded.width * utifDecoded.height > bestEmbeddedJpegPixels
-    ) {
-      uncompressed8 = utifDecoded;
-    }
   }
 
   // Case 2: Uncompressed or UTIF-decoded 8-bit TIFF / DNG (when higher res than embedded JPEG)
@@ -1714,6 +1756,7 @@ export async function decodeImageFileLocal(
       lut16ToOrig8G: LINEAR16_TO_SRGB8_LUT,
       lut16ToOrig8B: LINEAR16_TO_SRGB8_LUT,
       isRaw,
+      isLinear16: true,
       extension: ext.toUpperCase(),
       exposureScale: 1.0,
       detectedColorSpace,

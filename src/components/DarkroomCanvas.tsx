@@ -6,10 +6,8 @@ import {
   Eye,
   EyeOff,
   Upload,
-  MousePointer,
   Eraser,
-  Paintbrush,
-  RotateCcw,
+  PlusCircle,
   Undo2,
   Redo2,
   Minus,
@@ -32,10 +30,17 @@ interface DarkroomCanvasProps {
   spots: DetectedDustSpot[];
   selectedSpotId: string | null;
   onSelectSpot: (id: string | null) => void;
-  onToggleSpot: (id: string) => void;
   manualStrokes: ManualBrushStroke[];
-  onAddManualStroke: (stroke: ManualBrushStroke) => void;
-  onClearManualStrokes: () => void;
+  onPenAddCommit: (payload: {
+    newSpot?: DetectedDustSpot;
+    reenableSpotId?: string;
+    newStroke?: ManualBrushStroke;
+  }) => void;
+  onPenRemoveCommit: (payload: {
+    disableSpotIds: string[];
+    deleteManualSpotIds: string[];
+    updatedStrokes: ManualBrushStroke[];
+  }) => void;
   showDustOverlay: boolean;
   onToggleDustOverlay: (val: boolean) => void;
   overlayMode: OverlayMode;
@@ -48,12 +53,11 @@ interface DarkroomCanvasProps {
   onChangeComparisonMode: (mode: ViewComparisonMode) => void;
   hasInpaintedResult: boolean;
   isProcessing: boolean;
+  isIncrementalSyncing?: boolean;
   processingLabel: string;
   progressPercent?: number;
   progressInfo?: DetailedProgressInfo | null;
   onUploadFile: (file: File) => void;
-  onBatchDeselectSpots?: (ids: string[]) => void;
-  onBeginHistoryBatch?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -69,9 +73,9 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   spots,
   selectedSpotId,
   onSelectSpot,
-  onToggleSpot,
   manualStrokes,
-  onAddManualStroke,
+  onPenAddCommit,
+  onPenRemoveCommit,
   showDustOverlay,
   onToggleDustOverlay,
   overlayMode,
@@ -84,12 +88,11 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   onChangeComparisonMode,
   hasInpaintedResult,
   isProcessing,
+  isIncrementalSyncing = false,
   processingLabel,
   progressPercent = 0,
   progressInfo = null,
   onUploadFile,
-  onBatchDeselectSpots,
-  onBeginHistoryBatch,
   onUndo,
   onRedo,
   canUndo = false,
@@ -119,7 +122,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     setPan({ x: 0, y: 0 });
   }, [meta?.originalFileName]);
 
-  // Lightroom keyboard shortcuts
+  // Keyboard shortcuts for simplified 2-pen workflow
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -145,14 +148,10 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         onChangeBrushRadius(Math.min(120, brushRadius + 4));
       } else if (k === 'o') {
         onToggleDustOverlay(!showDustOverlay);
-      } else if (k === 'd') {
-        onChangeInteractionTool('deselect-brush');
-      } else if (k === 'i' || k === 'v') {
-        onChangeInteractionTool('inspect');
-      } else if (k === 'b') {
-        onChangeInteractionTool('brush-add');
-      } else if (k === 'e') {
-        onChangeInteractionTool('brush-erase');
+      } else if (k === 'b' || k === '1' || k === 'a') {
+        onChangeInteractionTool('pen-add');
+      } else if (k === 'e' || k === '2' || k === 'd') {
+        onChangeInteractionTool('pen-remove');
       } else if (k === '\\') {
         onChangeComparisonMode(
           comparisonMode === 'original-only' ? 'healed-only' : 'original-only'
@@ -188,26 +187,52 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     [meta]
   );
 
-  const sweepDeselectAtPoint = useCallback(
-    (fullPt: { x: number; y: number }) => {
-      if (!meta || !onBatchDeselectSpots) return;
-      const radiusInSensorPx = brushRadius / meta.workScale;
-      const toDeselect: string[] = [];
-      for (const spot of spots) {
-        if (!spot.enabled) continue;
-        const dist = Math.hypot(spot.cx - fullPt.x, spot.cy - fullPt.y);
-        if (dist <= spot.radius + radiusInSensorPx) {
-          toDeselect.push(spot.id);
-        }
+  // Distance from point P to segment AB
+  const distPointToSegment = (
+    px: number,
+    py: number,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number
+  ): number => {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq < 1e-6) return Math.hypot(px - ax, py - ay);
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+  };
+
+  const isPointHitByPath = useCallback(
+    (
+      px: number,
+      py: number,
+      targetRadius: number,
+      pathPts: Array<{ x: number; y: number }>,
+      penRadius: number
+    ): boolean => {
+      const hitThreshold = targetRadius + penRadius;
+      if (pathPts.length === 1) {
+        return Math.hypot(px - pathPts[0].x, py - pathPts[0].y) <= hitThreshold;
       }
-      if (toDeselect.length > 0) {
-        onBatchDeselectSpots(toDeselect);
+      for (let i = 0; i < pathPts.length - 1; i++) {
+        const d = distPointToSegment(
+          px,
+          py,
+          pathPts[i].x,
+          pathPts[i].y,
+          pathPts[i + 1].x,
+          pathPts[i + 1].y
+        );
+        if (d <= hitThreshold) return true;
       }
+      return false;
     },
-    [meta, brushRadius, spots, onBatchDeselectSpots]
+    []
   );
 
-  // Render overlay markers
+  // Render overlay markers and active pen cursor
   useEffect(() => {
     const canvas = overlayCanvasRef.current;
     if (!canvas || !meta) return;
@@ -220,17 +245,28 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
 
     const scale = meta.workScale;
 
-    if (showDustOverlay) {
+    // Preview which spots are currently being swept by pen-remove
+    const activelyRemovedSpotIds = new Set<string>();
+    if (isDrawingStroke && interactionTool === 'pen-remove' && currentPoints.length > 0) {
+      for (const spot of spots) {
+        if (!spot.enabled && !spot.isManual) continue;
+        if (isPointHitByPath(spot.cx, spot.cy, spot.radius, currentPoints, brushRadius)) {
+          activelyRemovedSpotIds.add(spot.id);
+        }
+      }
+    }
+
+    if (showDustOverlay || isDrawingStroke) {
       const allStrokes = [
         ...manualStrokes,
-        ...(isDrawingStroke && currentPoints.length > 0 && interactionTool !== 'deselect-brush'
+        ...(isDrawingStroke && currentPoints.length > 0
           ? [
-               {
-                 id: 'temp',
-                 mode: interactionTool === 'brush-erase' ? ('erase' as const) : ('add' as const),
-                 radius: brushRadius,
-                 points: currentPoints,
-               },
+              {
+                id: 'temp_active_stroke',
+                mode: interactionTool === 'pen-remove' ? ('erase' as const) : ('add' as const),
+                radius: brushRadius,
+                points: currentPoints,
+              },
             ]
           : []),
       ];
@@ -241,10 +277,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.lineWidth = Math.max(4, st.radius * scale * 2);
-        ctx.strokeStyle =
-          st.mode === 'add' ? 'rgba(255, 69, 58, 0.45)' : 'rgba(160, 160, 160, 0.40)';
-        ctx.fillStyle =
-          st.mode === 'add' ? 'rgba(255, 69, 58, 0.45)' : 'rgba(160, 160, 160, 0.40)';
+        const isErasePreview = st.mode === 'erase';
+        ctx.strokeStyle = isErasePreview
+          ? 'rgba(56, 189, 248, 0.42)'
+          : 'rgba(255, 69, 58, 0.45)';
+        ctx.fillStyle = isErasePreview
+          ? 'rgba(56, 189, 248, 0.42)'
+          : 'rgba(255, 69, 58, 0.45)';
 
         if (st.points.length === 1) {
           ctx.beginPath();
@@ -266,7 +305,9 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         }
         ctx.restore();
       }
+    }
 
+    if (showDustOverlay) {
       const visibleSpots = spots.filter((spot) => {
         if (filterMode === 'multi-confirmed') return spot.isMultiConfirmed;
         if (filterMode === 'single-frame') return !spot.isMultiConfirmed;
@@ -278,11 +319,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         const cy = spot.cy * scale;
         const r = Math.max(5, spot.radius * scale + 2.5);
         const isSelected = spot.id === selectedSpotId;
+        const isBeingRemoved = activelyRemovedSpotIds.has(spot.id);
         const isMulti = spot.tier === 'multi-confirmed' || Boolean(spot.isMultiConfirmed);
         const isProj = spot.tier === 'projected' || Boolean(spot.isProjected);
+        const isManual = Boolean(spot.isManual);
 
-        let strokeColor = '#FF453A';
-        let fillColor = 'rgba(255, 69, 58, 0.12)';
+        let strokeColor = isManual ? '#FF9F0A' : '#FF453A';
+        let fillColor = isManual ? 'rgba(255, 159, 10, 0.16)' : 'rgba(255, 69, 58, 0.12)';
         if (isMulti) {
           strokeColor = '#0A84FF';
           fillColor = 'rgba(10, 132, 255, 0.16)';
@@ -299,7 +342,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         ctx.beginPath();
         ctx.arc(cx, cy, r, 0, Math.PI * 2);
 
-        if (spot.enabled) {
+        if (spot.enabled && !isBeingRemoved) {
           ctx.fillStyle = fillColor;
           ctx.fill();
           ctx.lineWidth = isSelected ? 2.2 : 1.5;
@@ -307,9 +350,11 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
           if (isProj) ctx.setLineDash([3, 3]);
           ctx.stroke();
         } else {
-          ctx.lineWidth = 1;
+          ctx.lineWidth = 1.2;
           ctx.setLineDash([2, 3]);
-          ctx.strokeStyle = 'rgba(160, 160, 160, 0.38)';
+          ctx.strokeStyle = isBeingRemoved
+            ? 'rgba(56, 189, 248, 0.85)'
+            : 'rgba(160, 160, 160, 0.38)';
           ctx.stroke();
         }
 
@@ -330,40 +375,38 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
       }
     }
 
-    // Active brush cursor ring (Lightroom feather circle style)
+    // Active pen cursor ring
     if (cursorImgPos) {
       const cursorX = cursorImgPos.x * scale;
       const cursorY = cursorImgPos.y * scale;
       const r = Math.max(4, brushRadius * scale);
 
-      if (interactionTool === 'brush-add' || interactionTool === 'brush-erase') {
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(cursorX, cursorY, r, 0, Math.PI * 2);
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = '#FFFFFF';
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cursorX, cursorY, r, 0, Math.PI * 2);
+      ctx.lineWidth = 1.6;
+      if (interactionTool === 'pen-add') {
+        ctx.strokeStyle = '#FF453A';
+        ctx.fillStyle = isDrawingStroke ? 'rgba(255, 69, 58, 0.22)' : 'rgba(255, 69, 58, 0.08)';
+        ctx.fill();
         ctx.stroke();
         ctx.beginPath();
         ctx.arc(cursorX, cursorY, r * 0.72, 0, Math.PI * 2);
         ctx.lineWidth = 1;
         ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.65)';
         ctx.stroke();
-        ctx.restore();
-      } else if (interactionTool === 'deselect-brush') {
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(cursorX, cursorY, r, 0, Math.PI * 2);
-        ctx.lineWidth = 1.75;
-        ctx.strokeStyle = '#FF453A';
+      } else {
+        // pen-remove
+        ctx.strokeStyle = '#38BDF8';
         ctx.setLineDash([4, 3]);
-        ctx.stroke();
         ctx.fillStyle = isDrawingStroke
-          ? 'rgba(255, 69, 58, 0.24)'
-          : 'rgba(255, 69, 58, 0.10)';
+          ? 'rgba(56, 189, 248, 0.24)'
+          : 'rgba(56, 189, 248, 0.10)';
         ctx.fill();
-        ctx.restore();
+        ctx.stroke();
       }
+      ctx.restore();
     }
   }, [
     meta,
@@ -378,10 +421,11 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     cursorImgPos,
     filterMode,
     showSpotLabels,
+    isPointHitByPath,
   ]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!meta) return;
+    if (!meta || isProcessing) return;
     e.currentTarget.setPointerCapture(e.pointerId);
 
     if (e.button === 1 || e.shiftKey) {
@@ -393,34 +437,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     const pt = clientToFullCoords(e.clientX, e.clientY);
     if (!pt) return;
     setCursorImgPos(pt);
-
-    if (interactionTool === 'deselect-brush') {
-      onBeginHistoryBatch?.();
-      setIsDrawingStroke(true);
-      sweepDeselectAtPoint(pt);
-    } else if (interactionTool === 'inspect') {
-      let nearestSpot: DetectedDustSpot | null = null;
-      let minDist = Infinity;
-
-      for (const spot of spots) {
-        const dist = Math.hypot(spot.cx - pt.x, spot.cy - pt.y);
-        const hitRadius = Math.max(spot.radius + 16 / meta.workScale, 20 / meta.workScale);
-        if (dist <= hitRadius && dist < minDist) {
-          minDist = dist;
-          nearestSpot = spot;
-        }
-      }
-
-      if (nearestSpot) {
-        onSelectSpot(nearestSpot.id);
-        onToggleSpot(nearestSpot.id);
-      } else {
-        onSelectSpot(null);
-      }
-    } else if (interactionTool === 'brush-add' || interactionTool === 'brush-erase') {
-      setIsDrawingStroke(true);
-      setCurrentPoints([pt]);
-    }
+    setIsDrawingStroke(true);
+    setCurrentPoints([pt]);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -434,10 +452,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     const pt = clientToFullCoords(e.clientX, e.clientY);
     setCursorImgPos(pt);
 
-    if (interactionTool === 'deselect-brush' && isDrawingStroke && pt) {
-      sweepDeselectAtPoint(pt);
-    } else if (isDrawingStroke && pt) {
-      setCurrentPoints((prev) => [...prev, pt]);
+    if (isDrawingStroke && pt) {
+      setCurrentPoints((prev) => {
+        if (prev.length === 0) return [pt];
+        const last = prev[prev.length - 1];
+        if (Math.hypot(pt.x - last.x, pt.y - last.y) < 1.5) return prev;
+        return [...prev, pt];
+      });
     }
   };
 
@@ -449,20 +470,149 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     }
     if (isPanning) {
       setIsPanning(false);
-    }
-    if (interactionTool === 'deselect-brush') {
-      setIsDrawingStroke(false);
       return;
     }
-    if (isDrawingStroke && currentPoints.length > 0) {
-      onAddManualStroke({
-        id: `stroke_${Date.now()}`,
-        mode: interactionTool === 'brush-erase' ? 'erase' : 'add',
-        radius: brushRadius,
-        points: currentPoints,
-      });
-      setCurrentPoints([]);
+    if (!isDrawingStroke || currentPoints.length === 0 || !meta) {
       setIsDrawingStroke(false);
+      setCurrentPoints([]);
+      return;
+    }
+
+    const pts = currentPoints;
+    setIsDrawingStroke(false);
+    setCurrentPoints([]);
+
+    // Measure total drag distance in screen/work pixels
+    let totalDragWorkPx = 0;
+    for (let i = 1; i < pts.length; i++) {
+      totalDragWorkPx +=
+        Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y) * meta.workScale;
+    }
+    const isSingleClick = totalDragWorkPx < 6.0;
+
+    if (interactionTool === 'pen-add') {
+      if (isSingleClick) {
+        const pt = pts[0];
+        // Check if clicking on a disabled auto-detected spot to re-enable it
+        let disabledHit: DetectedDustSpot | null = null;
+        let minDist = Infinity;
+        for (const s of spots) {
+          if (s.enabled) continue;
+          const d = Math.hypot(s.cx - pt.x, s.cy - pt.y);
+          if (d <= s.radius + brushRadius && d < minDist) {
+            minDist = d;
+            disabledHit = s;
+          }
+        }
+        if (disabledHit) {
+          onSelectSpot(disabledHit.id);
+          onPenAddCommit({ reenableSpotId: disabledHit.id });
+          return;
+        }
+
+        // Otherwise create a single circular manual spot at click position
+        const nextIndex =
+          spots.reduce((maxIdx, s) => Math.max(maxIdx, s.index || 0), 0) + 1;
+        const rFull = Math.max(2, Math.round(brushRadius * 10) / 10);
+        const workR = Math.max(3, Math.round((rFull * meta.workScale * 1.55 + 2.0) * 10) / 10);
+        const newSpot: DetectedDustSpot = {
+          id: `manual_spot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          index: nextIndex,
+          cx: Math.round(pt.x * 10) / 10,
+          cy: Math.round(pt.y * 10) / 10,
+          workCx: Math.round(pt.x * meta.workScale * 10) / 10,
+          workCy: Math.round(pt.y * meta.workScale * 10) / 10,
+          radius: rFull,
+          workRadius: workR,
+          area: Math.round(Math.PI * rFull * rFull * 10) / 10,
+          perimeter: Math.round(2 * Math.PI * rFull * 10) / 10,
+          circularity: 1.0,
+          contrastDropPct: 0,
+          spotType: rFull > 10 ? 'bokeh' : 'sharp',
+          enabled: true,
+          isManual: true,
+        };
+        onSelectSpot(newSpot.id);
+        onPenAddCommit({ newSpot });
+      } else {
+        // Continuous drag brush stroke
+        const newStroke: ManualBrushStroke = {
+          id: `stroke_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          mode: 'add',
+          radius: brushRadius,
+          points: pts,
+        };
+        onPenAddCommit({ newStroke });
+      }
+    } else {
+      // interactionTool === 'pen-remove' (Click or Drag both supported!)
+      const disableSpotIds: string[] = [];
+      const deleteManualSpotIds: string[] = [];
+
+      for (const s of spots) {
+        if (isPointHitByPath(s.cx, s.cy, s.radius, pts, brushRadius)) {
+          if (s.isManual) {
+            deleteManualSpotIds.push(s.id);
+          } else if (s.enabled) {
+            disableSpotIds.push(s.id);
+          }
+        }
+      }
+
+      // Also check manual add strokes: remove or split any stroke points hit by the remove pen
+      let strokesChanged = false;
+      const updatedStrokes: ManualBrushStroke[] = [];
+      for (const st of manualStrokes) {
+        if (st.mode !== 'add' || st.points.length === 0) {
+          updatedStrokes.push(st);
+          continue;
+        }
+        const survivingSegments: Array<Array<{ x: number; y: number }>> = [];
+        let currentSeg: Array<{ x: number; y: number }> = [];
+
+        for (const p of st.points) {
+          const hit = isPointHitByPath(p.x, p.y, st.radius, pts, brushRadius);
+          if (hit) {
+            strokesChanged = true;
+            if (currentSeg.length > 0) {
+              survivingSegments.push(currentSeg);
+              currentSeg = [];
+            }
+          } else {
+            currentSeg.push(p);
+          }
+        }
+        if (currentSeg.length > 0) {
+          survivingSegments.push(currentSeg);
+        }
+
+        if (survivingSegments.length === 1 && survivingSegments[0].length === st.points.length) {
+          updatedStrokes.push(st);
+        } else {
+          strokesChanged = true;
+          survivingSegments.forEach((seg, segIdx) => {
+            if (seg.length > 0) {
+              updatedStrokes.push({
+                ...st,
+                id: `${st.id}_seg${segIdx}_${Date.now()}`,
+                points: seg,
+              });
+            }
+          });
+        }
+      }
+
+      if (
+        disableSpotIds.length > 0 ||
+        deleteManualSpotIds.length > 0 ||
+        strokesChanged
+      ) {
+        onPenRemoveCommit({
+          disableSpotIds,
+          deleteManualSpotIds,
+          updatedStrokes: strokesChanged ? updatedStrokes : manualStrokes,
+        });
+      }
     }
   };
 
@@ -533,10 +683,10 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         >
           <Upload className="w-7 h-7 text-[#C2C1BB] mb-3" />
           <span className="text-sm font-semibold text-[#F7F6F2] mb-1">
-            사진 열기
+            RAW · TIFF · 사진 열기
           </span>
           <span className="text-xs text-[#888783] mb-5 tabular-nums text-center max-w-sm">
-            Canon · Nikon · Sony · Fujifilm · Panasonic · Olympus · Pentax · DNG
+            Canon · Nikon · Sony · Fujifilm · Panasonic · Olympus · Pentax · 16-bit DNG/TIFF
           </span>
           <button
             type="button"
@@ -607,99 +757,81 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               onPointerLeave={() => {
                 setCursorImgPos(null);
               }}
-              className={`absolute inset-0 w-full h-full touch-none ${
-                interactionTool === 'inspect' ? 'cursor-pointer' : 'cursor-crosshair'
-              }`}
+              className="absolute inset-0 w-full h-full touch-none cursor-crosshair"
             />
           </div>
 
-          {/* Unified Darkroom HUD Dock */}
+          {/* Subtle non-blocking indicator when real-time ROI checkpoint healing is syncing */}
+          {isIncrementalSyncing && !isProcessing && (
+            <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded bg-[#2B2B2E]/90 border border-[#535356] text-[11px] text-[#E7E6E1] flex items-center gap-2 shadow-lg pointer-events-none">
+              <div className="w-2.5 h-2.5 rounded-full border-2 border-[#556042] border-t-transparent animate-spin" />
+              <span>임시 저장본 국소 영역 실시간 반영 중...</span>
+            </div>
+          )}
+
+          {/* Unified Darkroom HUD Dock: Simplified 2-Pen Bar */}
           <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#3A3A3D]/95 backdrop-blur-md border border-[#535356] shadow-xl max-w-[96vw] overflow-x-auto text-[#E7E6E1]">
-            {/* Tool Selection Segment */}
-            <div className="flex items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
+            {/* Simplified 2-Pen Selector */}
+            <div className="flex items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0 gap-0.5">
               <button
                 type="button"
-                onClick={() => onChangeInteractionTool('inspect')}
-                title="스팟 선택 및 토글 (V)"
-                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
-                  interactionTool === 'inspect'
+                onClick={() => onChangeInteractionTool('pen-add')}
+                title="스팟 추가 펜 (B) — 클릭: 원형 스팟 찍기 / 드래그: 연속 브러시 복원"
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  interactionTool === 'pen-add'
                     ? 'bg-[#556042] text-[#F7F6F2]'
                     : 'text-[#888783] hover:text-[#C2C1BB]'
                 }`}
               >
-                <MousePointer className="w-3.5 h-3.5" />
+                <PlusCircle className="w-3.5 h-3.5" />
+                <span>스팟 추가 펜</span>
               </button>
               <button
                 type="button"
-                onClick={() => onChangeInteractionTool('deselect-brush')}
-                title="스팟 해제 브러시 (D)"
-                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
-                  interactionTool === 'deselect-brush'
+                onClick={() => onChangeInteractionTool('pen-remove')}
+                title="스팟 제거 펜 (E) — 클릭 또는 드래그로 자동 인식 먼지 해제 및 수동 스팟 원복"
+                className={`flex items-center gap-1 px-2.5 py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  interactionTool === 'pen-remove'
                     ? 'bg-[#556042] text-[#F7F6F2]'
                     : 'text-[#888783] hover:text-[#C2C1BB]'
                 }`}
               >
                 <Eraser className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onChangeInteractionTool('brush-add')}
-                title="수동 복원 브러시 (B)"
-                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
-                  interactionTool === 'brush-add'
-                    ? 'bg-[#556042] text-[#F7F6F2]'
-                    : 'text-[#888783] hover:text-[#C2C1BB]'
-                }`}
-              >
-                <Paintbrush className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => onChangeInteractionTool('brush-erase')}
-                title="마스크 지우개 (E)"
-                className={`p-1.5 rounded-xs transition-colors cursor-pointer ${
-                  interactionTool === 'brush-erase'
-                    ? 'bg-[#556042] text-[#F7F6F2]'
-                    : 'text-[#888783] hover:text-[#C2C1BB]'
-                }`}
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
+                <span>스팟 제거 펜</span>
               </button>
             </div>
 
-            {/* Brush Radius Controls (Visible when a brush tool is active) */}
-            {interactionTool !== 'inspect' && (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
-                <button
-                  type="button"
-                  onClick={() => onChangeBrushRadius(Math.max(4, brushRadius - 4))}
-                  title="반경 축소 ([)"
-                  className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
-                >
-                  <Minus className="w-3 h-3" />
-                </button>
-                <input
-                  type="range"
-                  min={4}
-                  max={120}
-                  value={brushRadius}
-                  onChange={(e) => onChangeBrushRadius(Number(e.target.value))}
-                  className="lr-slider w-14"
-                  title="브러시 반경 조절"
-                />
-                <button
-                  type="button"
-                  onClick={() => onChangeBrushRadius(Math.min(120, brushRadius + 4))}
-                  title="반경 확대 (])"
-                  className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-                <span className="text-[10px] font-medium text-[#E7E6E1] tabular-nums w-7 text-right">
-                  {brushRadius}px
-                </span>
-              </div>
-            )}
+            {/* Pen Size Controls (Always visible for both pens) */}
+            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
+              <button
+                type="button"
+                onClick={() => onChangeBrushRadius(Math.max(4, brushRadius - 4))}
+                title="펜 크기 축소 ([)"
+                className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
+              >
+                <Minus className="w-3 h-3" />
+              </button>
+              <input
+                type="range"
+                min={4}
+                max={120}
+                value={brushRadius}
+                onChange={(e) => onChangeBrushRadius(Number(e.target.value))}
+                className="lr-slider w-14"
+                title="펜 반경 조절"
+              />
+              <button
+                type="button"
+                onClick={() => onChangeBrushRadius(Math.min(120, brushRadius + 4))}
+                title="펜 크기 확대 (])"
+                className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
+              >
+                <Plus className="w-3 h-3" />
+              </button>
+              <span className="text-[10px] font-medium text-[#E7E6E1] tabular-nums w-7 text-right">
+                {brushRadius}px
+              </span>
+            </div>
 
             {/* History Undo / Redo */}
             <div className="flex items-center gap-0.5 shrink-0">
@@ -729,7 +861,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             <button
               type="button"
               onClick={() => onToggleDustOverlay(!showDustOverlay)}
-              title="오버레이 표시 (O)"
+              title="먼지 마커 오버레이 표시 (O)"
               className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 showDustOverlay
                   ? 'bg-[#556042] text-[#F7F6F2]'
@@ -767,12 +899,14 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 onChangeComparisonMode('working');
               }}
               className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-                overlayMode === 'red-circle' && comparisonMode !== 'original-only' && comparisonMode !== 'split'
+                overlayMode === 'red-circle' &&
+                comparisonMode !== 'original-only' &&
+                comparisonMode !== 'split'
                   ? 'bg-[#556042] text-[#F7F6F2]'
                   : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
-              {hasInpaintedResult ? '복원본' : '작업본'}
+              {hasInpaintedResult ? '임시저장 복원본' : '작업본'}
             </button>
 
             {hasInpaintedResult && (
@@ -908,7 +1042,6 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               </span>
             </div>
 
-            {/* Clean Single Slim Progress Bar */}
             <div className="w-full bg-[#1E1E20] h-1.5 rounded-full overflow-hidden">
               <div
                 style={{

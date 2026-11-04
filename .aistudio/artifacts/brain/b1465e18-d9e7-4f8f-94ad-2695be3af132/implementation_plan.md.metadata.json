@@ -1,6 +1,6 @@
 {
-  "summary": "전 세계 매이저 카메라 RAW 포맷(.NEF, .NRW, .RAF, .CR3, .CR2, .ARW, .ORF, .PEF, .SRW, .3FR, .IIQ, .RWL, .RW2, .DNG)을 서버 업로드 없이 브라우저 로컬 엔진(Web Worker)에서 직접 디코딩하고 제조사별 전용 EXIF 및 원본 센서 해상도를 완벽하게 추출하는 아키텍처 구현 계획입니다.",
-  "updatedAt": "2026-11-04T08:01:40.297567342Z",
+  "summary": "라이트룸 사전 처리용 무손실 16-bit RAW/DNG/TIFF 파이프라인 개선, 복원 결과 임시 저장 기반의 실시간 부분(ROI) 증분 복원/원복 엔진, 중복 연산 없는 즉시 내보내기, 그리고 2종 펜툴(스팟 추가 펜 / 스팟 제거 펜) 통합에 대한 아키텍처 및 구현 계획서입니다.",
+  "updatedAt": "2026-11-04T11:32:36.727982429Z",
   "requestFeedback": true,
   "userFacing": true
 }

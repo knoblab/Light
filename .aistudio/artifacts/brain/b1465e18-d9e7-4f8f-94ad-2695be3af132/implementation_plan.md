@@ -1,127 +1,111 @@
-# 전 세계 매이저 카메라 RAW 포맷 풀 지원 및 브라우저 전용 초고속 디코더 고도화 계획
+# SensorClean Pro — 무손실 16-bit DR 보존 파이프라인 및 실시간 증분 펜툴 아키텍처
 
-Canon(.CR2, .CR3), Nikon(.NEF, .NRW), Sony(.ARW), Fujifilm(.RAF), Olympus(.ORF), Pentax(.PEF), Samsung(.SRW), Hasselblad(.3FR), PhaseOne(.IIQ), Leica(.RWL), Panasonic(.RW2), Adobe(.DNG) 등 전 세계 주요 카메라 RAW 파일 포맷을 브라우저 로컬 Web Worker에서 서버 전송 없이 100% 로컬로 직접 디코딩하고, 카메라 제조사별 고유 컨테이너(ISOBMFF, RAF Header, TIFF SubIFD/MakerNote)로부터 원본 센서 해상도와 정밀 EXIF를 완벽히 추출합니다.
+라이트룸(Lightroom) 등 현상 소프트웨어로 사진을 넘기기 전, **단 1비트의 다이내믹 레인지(DR)나 화질 손실 없이 오직 센서 먼지 영역만 정밀 복원**하여 DNG·16-bit TIFF로 내보내는 사전 처리(Pre-processor) 파이프라인 개선 및 인터랙션 개편 계획입니다.
 
-## User Review & Critical Decisions
+---
+
+### 사용자 검토 및 확정된 핵심 결정 사항
 
 > [!IMPORTANT]
-> 사용자 질의응답을 통해 확정된 제품 및 아키텍처 결정 사항입니다.
+> 1단계 질의응답을 통해 확정된 설계 방향이며, 모든 구현은 아래 원칙을 최우선으로 따릅니다.
 
-- **지원 포맷 범위 (확정)**: 요청하신 6종 포맷(.NEF, .NRW, .RAF, .CR3, .CR2, .ARW)을 포함하여 Olympus(.ORF), Pentax(.PEF), Samsung(.SRW), Hasselblad(.3FR), PhaseOne(.IIQ), Leica(.RWL), Panasonic(.RW2), Adobe(.DNG) 등 글로벌 주요 제조사의 모든 RAW 포맷을 포괄적으로 지원합니다.
-- **디코딩 아키텍처 (확정)**: 대용량 RAW 파일(50MB~150MB+)을 서버로 전송하지 않고 브라우저 로컬(Web Worker + OffscreenCanvas)에서 직접 바이트 수준으로 컨테이너를 파싱하여 수백 밀리초 이내에 16비트 선형 배열 및 고해상도 작업 버퍼로 로드합니다.
-- **메타데이터 & 센서 규격 보존 (확정)**: Canon ISOBMFF box 파서, Fuji RAF 헤더 파서, Nikon/Sony/Olympus TIFF SubIFD 파서를 통해 카메라 제조사 고유 태그, 렌즈 정보, 셔터/조리개/ISO/화각, 그리고 센서의 유효 해상도(Effective Sensor Resolution)를 완벽하게 추출하고 내보내기 시 보존합니다.
-
----
-
-## 1. Overview & Core Concept
-
-- **What It Does**: 현존하는 거의 모든 상용 카메라 브랜드(Canon, Nikon, Sony, Fujifilm, Panasonic, Olympus, Pentax, Leica, Hasselblad, PhaseOne)의 RAW 포맷을 드래그앤드롭만으로 즉시 열람하고, 16비트 선형 센서 물리 기반으로 먼지를 탐지·복원합니다.
-- **Target Audience**: 다양한 바디(예: 소니 A7/A1, 니콘 Z/D시리즈, 캐논 R/EOS시리즈, 후지 X/GFX시리즈 등)를 사용하는 상업 사진가, 천체/풍경 사진가, 스튜디오 리터쳐.
-- **Key Value**: 별도의 외부 변환기(DNG Converter 등)를 거칠 필요 없이 원본 RAW 파일을 브라우저에 바로 던져 넣어 작업할 수 있으며, 네트워크 대역폭 소모 없이 안전하게 개인 사진을 다룰 수 있습니다.
+- **확정 결정 1 — 무손실 16-bit RAW 디코딩 및 출력 파이프라인**: 백엔드의 LibRaw(`rawpy`) 16-bit 선형(Linear) 디모자이킹 파이프라인을 우선 사용하여 내장 8-bit JPEG 프리뷰 의존 문제를 근본적으로 해결하고, 로컬 워커에서도 16-bit 원본 계조 훼손 요소(TIFF 상위 바이트 덮어쓰기, DNG 임의 톤 커브 주입 등)를 완전히 제거합니다.
+- **확정 결정 2 — 복원본 임시 저장 및 실시간 부분(ROI) 증분 수정**: 먼지 제거를 실행하면 16-bit 및 프리뷰 복원 버퍼를 세션에 임시 저장(체크포인트)하고, 이후 펜으로 스팟을 추가하거나 해제할 때 전체 이미지를 재연산하지 않고 **변경된 국소 영역(Bounding ROI)만 임시 저장본 위에서 즉시 실시간 복원 또는 원본 픽셀로 원복**합니다.
+- **확정 결정 3 — 2종 통합 펜툴 (추가 펜 / 제거 펜) 및 클릭·드래그 겸용**: 기존의 복잡한 4종 도구를 **스팟 추가 펜**과 **스팟 제거 펜** 딱 2개로 통합하며, 클릭 시 단일 원형 스팟 생성/해제, 드래그 시 연속 브러시 스트로크 복원/해제를 모두 지원합니다.
+- **확정 결정 4 — 내보내기(Export) 시 중복 먼지 제거 연산 제거**: 이미 임시 저장된 최신 16-bit 복원 버퍼가 존재할 경우 내보내기 단계에서 인페인팅을 다시 수행하지 않고 즉시 DNG/TIFF/PNG/JPG 파일로 직렬화하여 내보내기 속도를 극대화합니다.
 
 ---
 
-## 2. Supported Camera RAW Formats & Container Specifications
+### 1. 개요 및 핵심 문제 해결 (DR·화질 손실 요소 완벽 제거)
 
-| 카메라 제조사 | 확장자 | 컨테이너 구조 및 전용 파서 전략 |
-| :--- | :--- | :--- |
-| **Canon** | `.CR3` | **ISOBMFF (QuickTime/MP4 box)**: `ftypcrx `, `moov`/`trak`/`mdat`, `prvw`(Preview JPEG), `thmb` 박스를 파싱하여 최고해상도 원본 임베디드 스트림 및 EXIF 메타데이터 바이트 추출 |
-| **Canon** | `.CR2` | **TIFF 확장 헤더 (`II\x2a\x00\x10\x00\x00\x00`)**: IFD0(미리보기), IFD1(썸네일), IFD2/3(슬라이스 RAW), Exif IFD 및 Canon MakerNote 태그 파싱 |
-| **Nikon** | `.NEF`, `.NRW` | **TIFF 베이스 (`II\x2a\x00`)**: IFD0 SubIFD0/1, Exif MakerNote, JpgFromRaw(전체 해상도 JPEG) 오프셋 및 센서 풀사이즈 추출 |
-| **Fujifilm** | `.RAF` | **Fujifilm CCD-RAW 헤더 (`FUJIFILMCCD-RAW `)**: 오프셋 84~104의 내장 JPEG 오프셋/길이 파싱 및 Fuji EXIF IFD 파서 구동 |
-| **Sony** | `.ARW` | **TIFF 베이스 (`II\x2a\x00`)**: IFD0, SubIFD, SR2SubIFD(Tag 0x7010), 내장 최고 해상도 프리뷰 및 카메라 센서 치수 파싱 |
-| **Olympus / OM** | `.ORF` | **Olympus 헤더 (`II\x52\x4f` 0x4F52, `II\x53\x52` 0x5253)**: 매직 바이트 검증 및 IFD 트리 탐색 |
-| **Panasonic** | `.RW2`, `.RAW` | **Panasonic 헤더 (`II\x55\x00`)**: Tag 0x002E(JpgFromRaw), SensorWidth(0x0002), SensorHeight(0x0003) 파싱 |
-| **Pentax** | `.PEF` | **TIFF 베이스 (`II\x2a\x00`)**: Pentax MakerNote 및 내장 풀사이즈 스트림 추출 |
-| **Samsung** | `.SRW` | **TIFF 베이스**: 삼성 NX 시리즈 고유 IFD 구조 및 프리뷰 추출 |
-| **Hasselblad** | `.3FR`, `.FFF` | **Hasselblad TIFF**: 중형 디지털 백 센서 메타데이터 및 프리뷰 파싱 |
-| **PhaseOne** | `.IIQ` | **PhaseOne TIFF**: IQ 시리즈 중형 센서 치수 및 프리뷰 추출 |
-| **Leica** | `.RWL`, `.DNG` | **TIFF / DNG 규격**: 라이카 M/SL/Q 시리즈 DNG/RWL 완벽 호환 |
-| **Adobe 표준** | `.DNG` | **Adobe Digital Negative**: 16비트 선형 TIFF 스트립, SubIFD, DefaultCropSize 파싱 |
+- **해결 과제 1: 내장 8-bit JPEG 추출 방식 폐기 → 진짜 16-bit Linear RAW 파이프라인 직결**
+  - 기존에는 프론트엔드가 브라우저 로컬 디코더만 호출하여 압축 RAW 파일(`.RW2`, `.CR2`, `.CR3`, `.NEF`, `.ARW` 등)에서 8-bit 미리보기 JPEG을 꺼내 16비트로 단순 확장했기 때문에 RAW 고유의 하이라이트·암부 DR이 손실되었습니다.
+  - 이를 해결하기 위해 백엔드 LibRaw(`rawpy`) 16-bit 선형 디코딩 엔진(`gamma=(1,1)`, `no_auto_bright=True`, `output_bps=16`)을 우선 연결하고, 로컬 엔진 폴백 시에도 원본 16-bit 버퍼를 무손실로 유지합니다.
+- **해결 과제 2: DNG 및 16-bit TIFF 출력 시 계조·메타데이터 왜곡 차단**
+  - **Linear DNG 출력**: 임의로 삽입되던 하드코딩 S-커브(`ProfileToneCurve`)와 인위적인 노출 스케일 증폭(`1.12x` 클리핑)을 제거하여 하이라이트 클리핑을 방지하고, 원본 카메라의 화이트밸런스·색행렬·블랙/화이트 레벨 및 원본 EXIF/XMP를 그대로 보존합니다.
+  - **16-bit TIFF 출력**: 8-bit 프리뷰 값을 상위 바이트에 덮어쓰던 버그(`(v8 << 8) | subLsb`)를 제거하고, 순수 16-bit 픽셀 배열(0~65535)과 원본 ICC 프로파일·EXIF 태그를 1:1 무손실로 기록합니다.
+  - **Zero-Touch Outside Mask 원칙 강화**: 먼지 마스크 바깥의 모든 픽셀(`alpha == 0`)은 원본 16-bit 센서 코드값과 단 1 코드값(LSB)도 달라지지 않도록 비트 단위 무결성을 보장합니다.
 
 ---
 
-## 3. Technical Architecture & Implementation Details
+### 2. 사용자 경험(UX) 및 비주얼 디자인
 
-### Parser Architecture Diagram
+- **핵심 사용자 워크플로우**
+  1. **사진 열기 & 자동 먼지 분석**: RAW/TIFF/이미지를 불러온 뒤 `먼지 분석`을 누르면 16-bit 데이터 기반 듀얼 브랜치(미세 먼지 + 보케 먼지) 분석이 수행되고, 첫 복원본이 즉시 임시 저장(체크포인트)됩니다.
+  2. **2종 펜툴 기반 실시간 부분 수정**:
+     - **스팟 추가 펜 (`+` 펜, 단축키 `B`)**: 미처 잡히지 않은 먼지를 **클릭**(단일 원형 스팟)하거나 **드래그**(연속 스트로크)하면, 기존에 제거된 다른 먼지들은 전혀 다시 계산하지 않고 **방금 칠한 영역(ROI)만 임시 저장본 위에서 즉시 실시간 복원**됩니다. (비활성화된 스팟 위를 클릭하면 다시 활성화 및 해당 영역만 즉시 복원)
+     - **스팟 제거 펜 (`-` 펜, 단축키 `E`)**: 잘못 인식된 자동 검출 먼지나 수동 추가 스팟 위를 **클릭**하거나 **드래그**로 문지르면, 해당 스팟/스트로크가 해제됨과 동시에 **그 영역만 원본 16-bit 및 프리뷰 픽셀로 즉시 원복**됩니다.
+  3. **즉시 내보내기 (Zero-Redundant Inpaint)**: `내보내기`에서 DNG 또는 16-bit TIFF를 선택하면, 먼지 제거를 다시 돌리지 않고 현재 임시 저장된 16-bit 완료 버퍼를 그대로 패키징하여 즉시 다운로드합니다.
+- **비주얼 아이덴티티 및 다크룸 테마**
+  - *Aesthetic Direction*: Adobe Lightroom / Capture One 스타일의 정밀 다크룸 유틸리티 인터페이스.
+  - *Color Palette*: 중립 다크 슬레이트 캔버스(`#121212`), 구조적 패널 표면(`#2B2B2E`, `#3A3A3D`), 헤어라인 보더(`#535356`), 포커스 올리브 액센트(`#556042`), 추가 펜 오버레이(`#FF453A`), 제거 펜 커서(`#0A84FF` / 화이트 링).
+  - *Typography & Hierarchy*: 한국어 가독성이 뛰어난 깔끔한 산세리프 본문과 함께, 해상도·스팟 좌표·노출값·진행률 등 모든 수치 데이터에 `tabular-nums`를 적용하여 흔들림 없는 정렬을 유지합니다.
+  - *하단 다크룸 HUD 독(Dock) 단순화*: 기존 4개 아이콘을 **`[스팟 추가 펜]`** / **`[스팟 제거 펜]`** 2개의 명확한 한글+아이콘 버튼으로 개편하고, 바로 옆에서 브러시 반경(`[`, `]` 단축키 및 슬라이더)과 `되돌리기/다시 실행`, `오버레이 표시(O)`, `원본 비교(\)`를 직관적으로 조작할 수 있게 구성합니다.
+
+---
+
+### 3. 핵심 설계 결정 및 트레이드오프
+
+- **결정 1: 전체 재연산(Full Re-Inpaint) 대신 더티 영역(Dirty ROI) 기반 실시간 체크포인트 갱신**
+  - *선택한 방식*: 세션마다 `orig16`(원본 16-bit)과 `checkpoint16`(현재까지 복원 완료된 16-bit 임시 저장본)을 함께 유지합니다. 사용자가 스팟 추가 펜을 놓는(`pointerUp`) 순간 새로 추가된 스팟/스트로크의 바운딩 박스(ROI)만 계산하여 `checkpoint16` 및 프리뷰 캔버스에 패치하고, 제거 펜을 놓는 순간 해제된 스팟/스트로크의 바운딩 박스만 `orig16`에서 복구(겹치는 다른 활성 마스크가 있으면 해당 부분만 국소 재합성)합니다.
+  - *이유*: 수십 개의 먼지가 있는 고화소(40MP~60MP) RAW 파일에서 수동으로 먼지 하나를 더 지울 때마다 전체 스팟을 다시 계산하면 수 초씩 지연되지만, 국소 ROI 증분 패치를 사용하면 0.1~0.3초 내에 실시간으로 반영됩니다.
+- **결정 2: 내보내기 시 더티 플래그(Dirty Flag) 검사를 통한 무연산 패스스루(Pass-through)**
+  - *선택한 방식*: 임시 저장본(`inpainted_16bit.npy` / `healedLinear16`)의 상태 해시(활성 스팟 ID 집합 + 수동 스트로크 집합 + 복원 반경 + 입자 유지 여부)를 기록해 두고, 내보내기 요청 시 상태 해시가 동일하면 인페인팅 단계를 100% 건너뛰고 곧바로 바이너리 파일 생성기로 직행합니다.
+  - *이유*: 사용자가 화면에서 복원 결과를 확인한 뒤 내보내기를 누를 때 똑같은 먼지 제거 과정을 두 번 기다리는 비효율을 완벽히 없앱니다.
+
+---
+
+### 4. 기술 아키텍처 및 데이터 전략
+
+#### 시스템 아키텍처 및 증분 복원 데이터 흐름도
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                      User Drop / File Open Event                       │
-│    (.NEF, .NRW, .RAF, .CR3, .CR2, .ARW, .ORF, .PEF, .SRW, .3FR, etc.)   │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ ArrayBuffer
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ Web Worker: decodeImageFileLocal (src/engine/tiffRawDecoder.ts)        │
-│                                                                        │
-│ 1. Header & Signature Sniffing:                                        │
-│    ├─ ISOBMFF ('ftypcrx ' at +4): Canon CR3 Parser                     │
-│    │  └─ traverseBoxes() -> extract 'prvw' box / JPEG stream & EXIF    │
-│    ├─ Magic 'FUJIFILMCCD-RAW': Fujifilm RAF Parser                     │
-│    │  └─ read offset at +84/+88 -> extract embedded preview & EXIF     │
-│    ├─ Magic 0x4F52 ('RO') / 0x5253 ('SR'): Olympus ORF Parser          │
-│    ├─ Magic 0x0055 (85): Panasonic RW2 Parser                          │
-│    └─ Magic 0x002A (42): Standard TIFF (NEF, NRW, ARW, CR2, PEF, DNG)  │
-│                                                                        │
-│ 2. Deep IFD & MakerNote Traversal:                                     │
-│    ├─ SubIFDs (Tag 330), Exif IFD (Tag 34665), MakerNote (Tag 37500)   │
-│    ├─ Highest Resolution Preview Detection (SOF0/SOF1/SOF2 dimensions) │
-│    └─ Native Sensor Dimensions (ImageWidth, ExifImageWidth, DNG crop)  │
-│                                                                        │
-│ 3. Color Space & 16-bit Linear Buffer Synthesis:                       │
-│    ├─ Embedded ICC Profile (APP2 / Tag 34675) extraction & recognition │
-│    └─ Perceptual 8-bit to 16-bit Linear LUT mapping (0..65535)         │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ DecodedImagePayload
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│ Main Thread & UI Engine                                                │
-│ ├─ Session Metadata: Brand, Model, Lens, Shutter, Aperture, ISO, Sensor │
-│ ├─ DarkroomCanvas: Native resolution rendering & 16-bit Dust Inspection│
-│ └─ Export Pipeline: DNG 16-bit Linear / TIFF 16-bit / PNG / JPEG       │
-└────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Darkroom Workspace UI (React)                         │
+│                                                                              │
+│  ┌────────────────────────────────────┐  ┌────────────────────────────────┐  │
+│  │        2-Pen HUD Toolbar           │  │     Inspector & Export Bar     │  │
+│  │  [+ 스팟 추가 펜]  [- 스팟 제거 펜]  │  │  [먼지 분석] [즉시 내보내기 ▼] │  │
+│  │   • 클릭: 단일 원형 스팟 추가/해제   │  │   • DNG (16-bit Linear 무손실) │  │
+│  │   • 드래그: 연속 스트로크 복원/해제  │  │   • TIFF (16-bit RGB 무손실)   │  │
+│  └─────────────────┬──────────────────┘  └───────────────┬────────────────┘  │
+└────────────────────┼─────────────────────────────────────┼───────────────────┘
+                     │ 실시간 국소 ROI 패치 요청             │ 캐시 적중 시 즉시 직렬화
+                     ▼                                     ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│         Hybrid 16-Bit Sensor Engine (Backend LibRaw + Worker Cache)          │
+│                                                                              │
+│  ┌──────────────────────────┐    초기 복원     ┌──────────────────────────┐  │
+│  │  원본 무손실 버퍼 (Orig)  │ ──────────────► │ 임시 저장 체크포인트 버퍼 │  │
+│  │  • linear_16bit (uint16) │                 │  • checkpoint_16bit      │  │
+│  │  • orig_preview_u8       │ ◄────────────── │  • checkpoint_preview_u8 │  │
+│  └──────────────────────────┘  제거 펜: 국소   └─────────────┬────────────┘  │
+│                                원본 픽셀 복구                │                │
+│                                 추가 펜: 국소 ROI만 증분 복원 ┘                │
+└──────────────────────────────────────────────────────────────┬───────────────┘
+                                                               │
+                                                               ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                 Lossless 16-Bit Binary Exporters (Zero DR Loss)              │
+│  • Linear DNG 1.4: 순수 16-bit LinearRaw + 원본 WB/ColorMatrix + EXIF/XMP   │
+│  • 16-bit TIFF: 상위 바이트 왜곡 없는 순수 uint16 RGB + 원본 ICC 프로파일      │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key Technical Implementations
-
-1. **`src/engine/tiffRawDecoder.ts` 확장**:
-   - `RAW_EXT_SET`에 `nef`, `nrw`, `raf`, `cr3`, `cr2`, `arw`, `orf`, `pef`, `srw`, `3fr`, `iiq`, `rwl`, `mos`, `mrw` 추가.
-   - **Canon CR3 ISOBMFF Parser**:
-     - 바이트 4~11에 위치한 `ftyp` 및 `crx ` 서명 검사.
-     - ISO 박스(`moov`, `uuid`, `prvw`, `thmb`) 순회 루프 구현.
-     - `prvw` 박스 내부의 고화질 풀해상도 JPEG 스트림 오프셋 및 바이트 크기 추출.
-     - `CMT1`, `CMT2`, `CMT3`, `CMT4` 박스로부터 Canon TIFF EXIF 블록 추출.
-   - **Fujifilm RAF Parser**:
-     - 시작 16바이트의 `FUJIFILMCCD-RAW ` 검사.
-     - 오프셋 84~92에서 내장 JPEG 오프셋과 길이 바이트를 빅엔디언으로 읽어 직접 추출.
-     - RAF EXIF 헤더 오프셋 탐색을 통한 렌즈 및 촬영 파라미터 파싱.
-   - **TIFF 기반 RAW (NEF, NRW, ARW, CR2, ORF, PEF) 확장**:
-     - 매직 바이트 검증 확장: `0x4F52` (Olympus ORF), `0x5253`, `0x0055` (RW2), `0x002A` (Nikon, Sony, Canon CR2, Pentax).
-     - Sony ARW의 SR2SubIFD (Tag 0x7010) 순회 및 전용 MakerNote 태그 처리.
-     - Nikon NEF의 SubIFD0/SubIFD1 및 ScanOfScan JPEG 스트림 추출.
-     - Canon CR2의 오프셋 8 이후 IFD 링크 및 스트립 테이블 처리.
-2. **UI 입력 및 파일 필터 동기화**:
-   - `src/App.tsx`:
-     - 파일 업로드 `<input type="file" accept="..." />`에 `.rw2,.dng,.cr2,.cr3,.nef,.nrw,.raf,.arw,.orf,.pef,.srw,.3fr,.iiq,.rwl,.mos,.mrw,image/*` 전체 명시.
-     - 빈 캔버스 드롭존 및 상단 헤더 툴팁에 "Canon(CR2/CR3), Nikon(NEF/NRW), Sony(ARW), Fujifilm(RAF), Panasonic(RW2), Olympus(ORF), Pentax(PEF), DNG 등 전 기종 RAW 지원" 안내 문구 반영.
-   - `python/raw_pipeline.py` & `server.ts`:
-     - 멀티 플랫폼 호환 및 서버 파이프라인(다운로드 및 일괄 처리)에서도 신규 확장자들을 정상적으로 허용하고 `rawpy`/`tifffile` 파이프라인과 일치시킵니다.
-
----
-
-## 4. Verification & Testing Strategy
-
-- **다양한 카메라 RAW 테스트**:
-  - Canon CR3 (EOS R5/R6/R7 등 ISOBMFF 컨테이너)
-  - Canon CR2 (EOS 5D Mark IV 등 레거시 TIFF 컨테이너)
-  - Nikon NEF / NRW (Z9, Z7, D850 등 고해상도 니콘 컨테이너)
-  - Sony ARW (A7R V, A7 IV, FX3 등 소니 컨테이너)
-  - Fujifilm RAF (X-T5, X-H2, GFX100 등 후지필름 컨테이너)
-  - Olympus ORF (OM-1, E-M1 등 올림푸스 컨테이너)
-- **검증 항목**:
-  1. 파일 드래그앤드롭 즉시 로컬 Web Worker 디코딩 성공 여부
-  2. 제조사별 카메라 모델명, 렌즈명, 노출값(조리개, 셔터, ISO, 초점거리)의 정확한 추출 여부
-  3. 센서 원본 해상도(Full Sensor Dimensions)의 정확한 유지 및 16비트 복원 파이프라인 연계
-  4. 16비트 DNG / 16비트 TIFF / PNG / JPEG 무손실 내보내기 정상 동작 여부
-  5. `compile_applet` 및 `lint_applet` 통과
+#### 데이터 모델 및 상태 매핑
+- **도구 상태 (`InteractionTool`)**: `'pen-add'` (스팟 추가 펜, 기본값) | `'pen-remove'` (스팟 제거 펜) 두 가지로 단일화합니다. (Shift+드래그 또는 마우스 휠 버튼으로 화면 패닝, 마우스 휠/버튼으로 줌인은 언제나 동작)
+- **스팟 추가 펜 (`pen-add`) 인터랙션**:
+  - **클릭 (이동 거리 < 4px)**:
+    - 클릭 지점에 비활성화된 자동 검출 스팟이 있으면 해당 스팟을 `enabled: true`로 전환하고 그 스팟의 ROI만 임시 저장본에 즉시 복원 패치합니다.
+    - 스팟이 없는 빈 곳이면 현재 브러시 반경(`brushRadius`) 크기의 새로운 원형 스팟(`isManual: true, enabled: true`)을 생성하고 해당 ROI만 즉시 복원 패치합니다.
+  - **드래그 (이동 거리 ≥ 4px)**:
+    - 드래그 궤적을 따라 연속 수동 복원 스트로크(`mode: 'add'`)를 생성하고, 스트로크의 바운딩 ROI만 임시 저장본 위에서 즉시 복원 패치합니다.
+- **스팟 제거 펜 (`pen-remove`) 인터랙션**:
+  - **클릭 또는 드래그**:
+    - 펜 반경과 겹치는 **자동 검출 스팟(`isManual: false`)**은 `enabled: false`로 즉시 해제합니다.
+    - 펜 반경과 겹치는 **수동 추가 스팟(`isManual: true`)**은 목록에서 제거하고, 겹치는 **수동 추가 스트로크**는 해당 부위를 지웁니다.
+    - 해제/제거된 스팟 및 스트로크가 차지하던 바운딩 박스(ROI) 영역을 `orig_16bit` / `orig_preview_u8` 원본 픽셀로 즉시 되돌려(만약 인접한 다른 활성 스팟과 겹치면 남은 스팟만 국소 재적용) 이미 제거된 다른 먼지들은 건드리지 않고 해당 부분만 즉시 원복합니다.
+- **체크포인트 상태 동기화 (`stateSignature`)**:
+  - 세션 내부에 마지막으로 복원된 상태 서명(`stateSignature`)을 저장합니다.
+  - 자동 분석 직후 첫 복원, 또는 추가/제거 펜을 통한 실시간 ROI 패치가 끝날 때마다 `checkpoint_16bit`와 `stateSignature`가 최신 상태로 유지됩니다.
+  - 사용자가 `내보내기(DNG / TIFF / PNG / JPG)`를 클릭하면 `currentSignature === stateSignature`임을 확인하고 인페인팅 연산을 0초로 생략한 뒤 즉시 파일 생성 및 다운로드를 수행합니다.

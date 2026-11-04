@@ -1526,13 +1526,77 @@ function createSeededGaussianRng(seed = 42) {
   };
 }
 
+export interface LocalCheckpointState {
+  healedRgb8: Uint8Array;
+  healedLinear16: Uint16Array;
+  workHealedRgb8: Uint8Array;
+  workMaskU8: Uint8Array;
+  bakedSpots: Map<string, { sig: string; spot: DetectedDustSpot }>;
+  bakedStrokes: Map<string, { sig: string; stroke: ManualBrushStroke }>;
+  bakedParamsSig: string;
+  lastInpaintResult: InpaintResult;
+}
+
+function getSpotFullBbox(
+  spot: DetectedDustSpot,
+  workScale: number,
+  padFull: number,
+  fullW: number,
+  fullH: number
+): [number, number, number, number] {
+  const skirtMult = spot.spotType === 'bokeh' ? 1.72 : 1.55;
+  const rFull = Math.max(
+    spot.radius * skirtMult + 3.0 / Math.max(workScale, 1e-4),
+    (spot.workRadius || 0) / Math.max(workScale, 1e-4)
+  );
+  const rad = Math.ceil(rFull) + padFull;
+  return [
+    Math.max(0, Math.floor(spot.cx) - rad),
+    Math.max(0, Math.floor(spot.cy) - rad),
+    Math.min(fullW, Math.ceil(spot.cx) + rad + 1),
+    Math.min(fullH, Math.ceil(spot.cy) + rad + 1),
+  ];
+}
+
+function getStrokeFullBbox(
+  stroke: ManualBrushStroke,
+  padFull: number,
+  fullW: number,
+  fullH: number
+): [number, number, number, number] {
+  if (!stroke.points || stroke.points.length === 0) return [0, 0, 0, 0];
+  const rFull = Math.ceil(stroke.radius || 12) + padFull;
+  let minX = Infinity,
+    maxX = -Infinity,
+    minY = Infinity,
+    maxY = -Infinity;
+  for (const p of stroke.points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return [
+    Math.max(0, Math.floor(minX) - rFull),
+    Math.max(0, Math.floor(minY) - rFull),
+    Math.min(fullW, Math.ceil(maxX) + rFull + 1),
+    Math.min(fullH, Math.ceil(maxY) + rFull + 1),
+  ];
+}
+
+function boxesOverlap(
+  a: [number, number, number, number],
+  b: [number, number, number, number]
+): boolean {
+  return !(a[2] <= b[0] || a[0] >= b[2] || a[3] <= b[1] || a[1] >= b[3]);
+}
+
 /**
- * Zero-Halo Plane-Detrended 16-bit & Camera-Color Inpainting with Zero-Touch Outside-Mask Preservation:
+ * Zero-Halo Plane-Detrended 16-bit & Camera-Color Inpainting with Incremental Checkpoint Cache:
+ *   - Maintains a temporary checkpoint (`LocalCheckpointState`) so already-healed dust spots are NEVER re-inpainted
+ *     when adding/removing individual spots or when exporting.
  *   - Pixels outside the dust healing mask (`roi_alpha == 0`) are NEVER modified or re-tonemapped:
  *     `healedRgb8` and `healedLinear16` retain 100% identical color, contrast, and deep blacks as the original photo.
- *   - Inside each connected dust ROI, fits a 1st-order background plane (ax + by + c) with symmetric
- *     [15, 85] percentile trimming on the clean outer reference ring, inpaints the detrended residual,
- *     restores the gradient plane + matched local sensor grain, and blends with outward-only feathering.
  */
 export function inpaint16BitAndCameraRgbLocal(
   origRgb8: Uint8Array,
@@ -1546,16 +1610,85 @@ export function inpaint16BitAndCameraRgbLocal(
   manualStrokes: ManualBrushStroke[],
   inpaintRadiusFull: number,
   preserveGrain: boolean,
-  onProgress?: (percent: number, label: string) => void
+  onProgress?: (percent: number, label: string) => void,
+  existingCheckpoint?: LocalCheckpointState
 ): {
   healedRgb8: Uint8Array;
   healedLinear16: Uint16Array;
   workHealedRgb8: Uint8Array;
   workMaskU8: Uint8Array;
   inpaintResult: InpaintResult;
+  checkpoint: LocalCheckpointState;
 } {
   const inpaintR = Math.max(3.0, Math.min(25.0, Number(inpaintRadiusFull || 6.0)));
   const skirtPadPx = Math.max(2, Math.round(inpaintR * 0.45));
+  const featherPx = Math.max(3, Math.round(inpaintR * 0.7));
+  const featherSigma = Math.max(2.0, featherPx * 0.55);
+  const ringWidthPx = Math.max(7, Math.round(inpaintR * 1.4 + 5));
+  const ringPad = ringWidthPx + featherPx + 4;
+  const restorePad = skirtPadPx + featherPx + 6;
+
+  const currentParamsSig = `${inpaintR.toFixed(2)}_${preserveGrain ? 1 : 0}`;
+
+  const currSpotsMap = new Map<string, { sig: string; spot: DetectedDustSpot }>();
+  for (let i = 0; i < spots.length; i++) {
+    const s = spots[i];
+    if (!s.enabled) continue;
+    const sid = s.id || `spot_${i}`;
+    const sig = `${s.cx.toFixed(2)}_${s.cy.toFixed(2)}_${s.radius.toFixed(2)}_${(s.workRadius || 0).toFixed(2)}_${s.spotType}`;
+    currSpotsMap.set(sid, { sig, spot: { ...s } });
+  }
+
+  const currStrokesMap = new Map<string, { sig: string; stroke: ManualBrushStroke }>();
+  for (let i = 0; i < manualStrokes.length; i++) {
+    const st = manualStrokes[i];
+    if (st.mode !== 'add' || !st.points || st.points.length === 0) continue;
+    const stid = st.id || `stroke_${i}`;
+    const p0 = st.points[0];
+    const pN = st.points[st.points.length - 1];
+    const sig = `${st.radius.toFixed(2)}_${st.points.length}_${p0.x.toFixed(1)}_${p0.y.toFixed(1)}_${pN.x.toFixed(1)}_${pN.y.toFixed(1)}`;
+    currStrokesMap.set(stid, { sig, stroke: { ...st, points: st.points.map((p) => ({ ...p })) } });
+  }
+
+  // Fast path: 100% identical to cached checkpoint -> 0ms return without any recomputation!
+  if (
+    existingCheckpoint &&
+    existingCheckpoint.bakedParamsSig === currentParamsSig &&
+    existingCheckpoint.bakedSpots.size === currSpotsMap.size &&
+    existingCheckpoint.bakedStrokes.size === currStrokesMap.size
+  ) {
+    let allSame = true;
+    for (const [k, v] of currSpotsMap) {
+      if (existingCheckpoint.bakedSpots.get(k)?.sig !== v.sig) {
+        allSame = false;
+        break;
+      }
+    }
+    if (allSame) {
+      for (const [k, v] of currStrokesMap) {
+        if (existingCheckpoint.bakedStrokes.get(k)?.sig !== v.sig) {
+          allSame = false;
+          break;
+        }
+      }
+    }
+    if (allSame) {
+      onProgress?.(100, '임시 저장본 즉시 불러오기 완료');
+      const cachedResult: InpaintResult = {
+        ...existingCheckpoint.lastInpaintResult,
+        fromCache: true,
+        incrementalRois: 0,
+      };
+      return {
+        healedRgb8: existingCheckpoint.healedRgb8,
+        healedLinear16: existingCheckpoint.healedLinear16,
+        workHealedRgb8: existingCheckpoint.workHealedRgb8,
+        workMaskU8: existingCheckpoint.workMaskU8,
+        inpaintResult: cachedResult,
+        checkpoint: existingCheckpoint,
+      };
+    }
+  }
 
   onProgress?.(5, '마스크 영역 분석 및 복원 대상 확인 중');
 
@@ -1573,21 +1706,101 @@ export function inpaint16BitAndCameraRgbLocal(
     if (fullMaskCore[i] > 0) inpaintedPixels++;
   }
 
-  const enabledSpotCount =
-    spots.filter((s) => s.enabled).length +
-    manualStrokes.filter((st) => st.mode === 'add').length;
+  const enabledSpotCount = currSpotsMap.size + currStrokesMap.size;
 
-  // Start with 1:1 exact copies of origRgb8 and linear16 (Zero-Touch Outside Mask!)
-  const healedRgb8 = new Uint8Array(origRgb8);
-  const healedLinear16 = new Uint16Array(linear16);
+  const canUseIncremental =
+    Boolean(existingCheckpoint) && existingCheckpoint!.bakedParamsSig === currentParamsSig;
 
-  if (inpaintedPixels > 0) {
-    const featherPx = Math.max(3, Math.round(inpaintR * 0.7));
-    const featherSigma = Math.max(2.0, featherPx * 0.55);
-    const ringWidthPx = Math.max(7, Math.round(inpaintR * 1.4 + 5));
-    const ringPad = ringWidthPx + featherPx + 4;
+  const healedRgb8 = canUseIncremental
+    ? existingCheckpoint!.healedRgb8
+    : new Uint8Array(origRgb8);
+  const healedLinear16 = canUseIncremental
+    ? existingCheckpoint!.healedLinear16
+    : new Uint16Array(linear16);
 
-    // Group touching spots on fullMaskCore using fast BFS connected components
+  const bakedSpots = canUseIncremental ? existingCheckpoint!.bakedSpots : new Map();
+  const bakedStrokes = canUseIncremental ? existingCheckpoint!.bakedStrokes : new Map();
+
+  const removedSpotIds: string[] = [];
+  for (const [sid, val] of bakedSpots.entries()) {
+    const curr = currSpotsMap.get(sid);
+    if (!curr || curr.sig !== val.sig) removedSpotIds.push(sid);
+  }
+  const addedSpotIds = new Set<string>();
+  for (const [sid, val] of currSpotsMap.entries()) {
+    const old = bakedSpots.get(sid);
+    if (!old || old.sig !== val.sig) addedSpotIds.add(sid);
+  }
+
+  const removedStrokeIds: string[] = [];
+  for (const [stid, val] of bakedStrokes.entries()) {
+    const curr = currStrokesMap.get(stid);
+    if (!curr || curr.sig !== val.sig) removedStrokeIds.push(stid);
+  }
+  const addedStrokeIds = new Set<string>();
+  for (const [stid, val] of currStrokesMap.entries()) {
+    const old = bakedStrokes.get(stid);
+    if (!old || old.sig !== val.sig) addedStrokeIds.add(stid);
+  }
+
+  const restoredBoxes: Array<[number, number, number, number]> = [];
+  for (const sid of removedSpotIds) {
+    const oldSpot = bakedSpots.get(sid)?.spot;
+    if (oldSpot) {
+      restoredBoxes.push(getSpotFullBbox(oldSpot, workScale, restorePad, fullW, fullH));
+    }
+  }
+  for (const stid of removedStrokeIds) {
+    const oldStroke = bakedStrokes.get(stid)?.stroke;
+    if (oldStroke) {
+      const box = getStrokeFullBbox(oldStroke, restorePad, fullW, fullH);
+      if (box[2] > box[0] && box[3] > box[1]) restoredBoxes.push(box);
+    }
+  }
+
+  // Restore removed bounding boxes from original buffers
+  for (const [bx1, by1, bx2, by2] of restoredBoxes) {
+    for (let fy = by1; fy < by2; fy++) {
+      const rowStart = (fy * fullW + bx1) * 3;
+      const rowEnd = (fy * fullW + bx2) * 3;
+      healedRgb8.set(origRgb8.subarray(rowStart, rowEnd), rowStart);
+      healedLinear16.set(linear16.subarray(rowStart, rowEnd), rowStart);
+    }
+  }
+
+  // Ensure any still-active spot/stroke overlapping a restored box is re-healed
+  if (restoredBoxes.length > 0) {
+    for (const [sid, { spot }] of currSpotsMap.entries()) {
+      if (addedSpotIds.has(sid)) continue;
+      const sbox = getSpotFullBbox(spot, workScale, restorePad, fullW, fullH);
+      if (restoredBoxes.some((rbox) => boxesOverlap(sbox, rbox))) {
+        addedSpotIds.add(sid);
+      }
+    }
+    for (const [stid, { stroke }] of currStrokesMap.entries()) {
+      if (addedStrokeIds.has(stid)) continue;
+      const stbox = getStrokeFullBbox(stroke, restorePad, fullW, fullH);
+      if (restoredBoxes.some((rbox) => boxesOverlap(stbox, rbox))) {
+        addedStrokeIds.add(stid);
+      }
+    }
+  }
+
+  const deltaSpots = Array.from(addedSpotIds).map((sid) => currSpotsMap.get(sid)!.spot);
+  const deltaStrokes = Array.from(addedStrokeIds).map((stid) => currStrokesMap.get(stid)!.stroke);
+
+  const healedBoxes: Array<[number, number, number, number]> = [];
+
+  if ((deltaSpots.length > 0 || deltaStrokes.length > 0) && inpaintedPixels > 0) {
+    const deltaMaskCore = buildFullResolutionMask(
+      fullW,
+      fullH,
+      workScale,
+      deltaSpots,
+      deltaStrokes,
+      skirtPadPx
+    );
+
     const visited = new Uint8Array(fullW * fullH);
     const q = new Int32Array(fullW * fullH);
     const randNorm = createSeededGaussianRng(42);
@@ -1606,14 +1819,17 @@ export function inpaint16BitAndCameraRgbLocal(
       const rowOff = y * fullW;
       for (let x = 0; x < fullW; x++) {
         const startIdx = rowOff + x;
-        if (!fullMaskCore[startIdx] || visited[startIdx]) continue;
+        if (!deltaMaskCore[startIdx] || visited[startIdx]) continue;
 
         let qHead = 0;
         let qTail = 0;
         q[qTail++] = startIdx;
         visited[startIdx] = 1;
 
-        let minX = x, maxX = x, minY = y, maxY = y;
+        let minX = x,
+          maxX = x,
+          minY = y,
+          maxY = y;
 
         while (qHead < qTail) {
           const curr = q[qHead++];
@@ -1624,7 +1840,6 @@ export function inpaint16BitAndCameraRgbLocal(
           if (cy < minY) minY = cy;
           if (cy > maxY) maxY = cy;
 
-          // Group spots within featherPx + 2 of each other
           const searchR = 2;
           for (let dy = -searchR; dy <= searchR; dy++) {
             const ny = cy + dy;
@@ -1634,7 +1849,7 @@ export function inpaint16BitAndCameraRgbLocal(
               const nx = cx + dx;
               if (nx < 0 || nx >= fullW) continue;
               const nIdx = nRow + nx;
-              if (fullMaskCore[nIdx] && !visited[nIdx]) {
+              if (deltaMaskCore[nIdx] && !visited[nIdx]) {
                 visited[nIdx] = 1;
                 q[qTail++] = nIdx;
               }
@@ -1650,6 +1865,7 @@ export function inpaint16BitAndCameraRgbLocal(
         const rh = by2 - by1;
         const roiSize = rw * rh;
 
+        healedBoxes.push([bx1, by1, bx2, by2]);
         components.push({
           bx1,
           by1,
@@ -1679,195 +1895,239 @@ export function inpaint16BitAndCameraRgbLocal(
         roiCore[(cy - by1) * rw + (cx - bx1)] = 255;
       }
 
-        const roiExpanded = dilateMaskCircular(roiCore, rw, rh, featherPx);
-        const roiOuterDilated = dilateMaskCircular(roiExpanded, rw, rh, ringWidthPx);
+      const roiExpanded = dilateMaskCircular(roiCore, rw, rh, featherPx);
+      const roiOuterDilated = dilateMaskCircular(roiExpanded, rw, rh, ringWidthPx);
 
-        // Outward-only feather mask: 1.0 across 100% of roiCore, smooth Gaussian taper outside
-        const roiExpFloat = new Float32Array(roiSize);
-        for (let i = 0; i < roiSize; i++) {
-          roiExpFloat[i] = roiExpanded[i] > 0 ? 1.0 : 0.0;
+      const roiExpFloat = new Float32Array(roiSize);
+      for (let i = 0; i < roiSize; i++) {
+        roiExpFloat[i] = roiExpanded[i] > 0 ? 1.0 : 0.0;
+      }
+      const roiAlpha = gaussianBlurFloat32(roiExpFloat, rw, rh, featherSigma);
+      for (let i = 0; i < roiSize; i++) {
+        if (roiCore[i] > 0) {
+          roiAlpha[i] = 1.0;
+        } else {
+          roiAlpha[i] = Math.max(0.0, Math.min(1.0, roiAlpha[i] * 1.12));
         }
-        const roiAlpha = gaussianBlurFloat32(roiExpFloat, rw, rh, featherSigma);
-        for (let i = 0; i < roiSize; i++) {
-          if (roiCore[i] > 0) {
-            roiAlpha[i] = 1.0;
-          } else {
-            roiAlpha[i] = Math.max(0.0, Math.min(1.0, roiAlpha[i] * 1.12));
+      }
+
+      const ringXs: number[] = [];
+      const ringYs: number[] = [];
+      for (let ry = 0; ry < rh; ry++) {
+        const fy = by1 + ry;
+        const rOff = ry * rw;
+        const fOff = fy * fullW;
+        for (let rx = 0; rx < rw; rx++) {
+          const fx = bx1 + rx;
+          const rIdx = rOff + rx;
+          if (
+            roiOuterDilated[rIdx] > 0 &&
+            roiExpanded[rIdx] === 0 &&
+            fullMaskCore[fOff + fx] === 0
+          ) {
+            ringXs.push(rx);
+            ringYs.push(ry);
           }
         }
+      }
 
-        // Clean reference ring strictly outside ANY spot's expanded mask
-        const ringXs: number[] = [];
-        const ringYs: number[] = [];
+      const normX = new Float32Array(roiSize);
+      const normY = new Float32Array(roiSize);
+      const halfW = Math.max(rw * 0.5, 1.0);
+      const halfH = Math.max(rh * 0.5, 1.0);
+      for (let ry = 0; ry < rh; ry++) {
+        const ny = (ry - rh * 0.5) / halfH;
+        const rOff = ry * rw;
+        for (let rx = 0; rx < rw; rx++) {
+          normX[rOff + rx] = (rx - rw * 0.5) / halfW;
+          normY[rOff + rx] = ny;
+        }
+      }
+
+      let cleanIndices: number[] | null = null;
+      if (ringXs.length >= 16) {
+        const nR = ringXs.length;
+        const rxArr = new Float32Array(nR);
+        const ryArr = new Float32Array(nR);
+        const gArr = new Float32Array(nR);
+        for (let i = 0; i < nR; i++) {
+          const rIdx = ringYs[i] * rw + ringXs[i];
+          rxArr[i] = normX[rIdx];
+          ryArr[i] = normY[rIdx];
+          const fIdx = ((by1 + ringYs[i]) * fullW + (bx1 + ringXs[i])) * 3;
+          gArr[i] = origRgb8[fIdx + 1];
+        }
+        const cG = fastFitPlane(rxArr, ryArr, gArr, nR);
+        const resG = new Float32Array(nR);
+        const resGSorted = new Float32Array(nR);
+        for (let i = 0; i < nR; i++) {
+          const r = gArr[i] - (cG[0] * rxArr[i] + cG[1] * ryArr[i] + cG[2]);
+          resG[i] = r;
+          resGSorted[i] = r;
+        }
+        resGSorted.sort();
+        const loR = resGSorted[Math.floor(nR * 0.15)];
+        const hiR = resGSorted[Math.min(nR - 1, Math.floor(nR * 0.85))];
+        const cList: number[] = [];
+        for (let i = 0; i < nR; i++) {
+          if (resG[i] >= loR && resG[i] <= hiR) cList.push(i);
+        }
+        if (cList.length >= 12) cleanIndices = cList;
+      }
+
+      const harmSigma = Math.max(2.0, Math.min(8.0, Math.min(rw, rh) * 0.12));
+
+      for (let ch = 0; ch < 3; ch++) {
+        const patch8 = new Float32Array(roiSize);
+        const patch16 = new Float32Array(roiSize);
+        const base8 = new Float32Array(roiSize);
+        const base16 = new Float32Array(roiSize);
         for (let ry = 0; ry < rh; ry++) {
           const fy = by1 + ry;
           const rOff = ry * rw;
           const fOff = fy * fullW;
           for (let rx = 0; rx < rw; rx++) {
-            const fx = bx1 + rx;
-            const rIdx = rOff + rx;
-            if (roiOuterDilated[rIdx] > 0 && roiExpanded[rIdx] === 0 && fullMaskCore[fOff + fx] === 0) {
-              ringXs.push(rx);
-              ringYs.push(ry);
-            }
+            const pIdx = (fOff + bx1 + rx) * 3 + ch;
+            patch8[rOff + rx] = origRgb8[pIdx];
+            patch16[rOff + rx] = linear16[pIdx];
+            base8[rOff + rx] = healedRgb8[pIdx];
+            base16[rOff + rx] = healedLinear16[pIdx];
           }
         }
 
-        const normX = new Float32Array(roiSize);
-        const normY = new Float32Array(roiSize);
-        const halfW = Math.max(rw * 0.5, 1.0);
-        const halfH = Math.max(rh * 0.5, 1.0);
-        for (let ry = 0; ry < rh; ry++) {
-          const ny = (ry - rh * 0.5) / halfH;
-          const rOff = ry * rw;
-          for (let rx = 0; rx < rw; rx++) {
-            normX[rOff + rx] = (rx - rw * 0.5) / halfW;
-            normY[rOff + rx] = ny;
-          }
-        }
-
-        // Determine clean [15, 85] percentile ring subset using Green channel
-        let cleanIndices: number[] | null = null;
-        if (ringXs.length >= 16) {
-          const nR = ringXs.length;
-          const rxArr = new Float32Array(nR);
-          const ryArr = new Float32Array(nR);
-          const gArr = new Float32Array(nR);
-          for (let i = 0; i < nR; i++) {
+        let grainStd8 = 0;
+        let grainStd16 = 0;
+        if (preserveGrain && ringXs.length >= 12) {
+          const blur8 = gaussianBlurFloat32(patch8, rw, rh, 1.2);
+          const blur16 = gaussianBlurFloat32(patch16, rw, rh, 1.2);
+          const hf8 = new Float32Array(ringXs.length);
+          const hf16 = new Float32Array(ringXs.length);
+          for (let i = 0; i < ringXs.length; i++) {
             const rIdx = ringYs[i] * rw + ringXs[i];
-            rxArr[i] = normX[rIdx];
-            ryArr[i] = normY[rIdx];
-            const fIdx = ((by1 + ringYs[i]) * fullW + (bx1 + ringXs[i])) * 3;
-            gArr[i] = origRgb8[fIdx + 1];
+            hf8[i] = Math.abs(patch8[rIdx] - blur8[rIdx]);
+            hf16[i] = Math.abs(patch16[rIdx] - blur16[rIdx]);
           }
-          const cG = fastFitPlane(rxArr, ryArr, gArr, nR);
-          const resG = new Float32Array(nR);
-          const resGSorted = new Float32Array(nR);
-          for (let i = 0; i < nR; i++) {
-            const r = gArr[i] - (cG[0] * rxArr[i] + cG[1] * ryArr[i] + cG[2]);
-            resG[i] = r;
-            resGSorted[i] = r;
-          }
-          resGSorted.sort();
-          const loR = resGSorted[Math.floor(nR * 0.15)];
-          const hiR = resGSorted[Math.min(nR - 1, Math.floor(nR * 0.85))];
-          const cList: number[] = [];
-          for (let i = 0; i < nR; i++) {
-            if (resG[i] >= loR && resG[i] <= hiR) cList.push(i);
-          }
-          if (cList.length >= 12) cleanIndices = cList;
+          hf8.sort();
+          hf16.sort();
+          grainStd8 = Math.min(3.5, hf8[ringXs.length >> 1] * 1.4826);
+          grainStd16 = Math.min(450.0, hf16[ringXs.length >> 1] * 1.4826);
         }
 
-        const harmSigma = Math.max(2.0, Math.min(8.0, Math.min(rw, rh) * 0.12));
+        let healedPatch8: Float32Array;
+        let healedPatch16: Float32Array;
 
-        // Process each of the 3 channels for both origRgb8 (camera display space) and linear16 (16-bit space)
-        for (let ch = 0; ch < 3; ch++) {
-          const patch8 = new Float32Array(roiSize);
-          const patch16 = new Float32Array(roiSize);
-          for (let ry = 0; ry < rh; ry++) {
-            const fy = by1 + ry;
-            const rOff = ry * rw;
-            const fOff = fy * fullW;
-            for (let rx = 0; rx < rw; rx++) {
-              const pIdx = (fOff + bx1 + rx) * 3 + ch;
-              patch8[rOff + rx] = origRgb8[pIdx];
-              patch16[rOff + rx] = linear16[pIdx];
-            }
+        if (cleanIndices) {
+          const nC = cleanIndices.length;
+          const cxArr = new Float32Array(nC);
+          const cyArr = new Float32Array(nC);
+          const cv8 = new Float32Array(nC);
+          const cv16 = new Float32Array(nC);
+          for (let i = 0; i < nC; i++) {
+            const idx = cleanIndices[i];
+            const rIdx = ringYs[idx] * rw + ringXs[idx];
+            cxArr[i] = normX[rIdx];
+            cyArr[i] = normY[rIdx];
+            cv8[i] = patch8[rIdx];
+            cv16[i] = patch16[rIdx];
+          }
+          const coeffs8 = fastFitPlane(cxArr, cyArr, cv8, nC);
+          const coeffs16 = fastFitPlane(cxArr, cyArr, cv16, nC);
+
+          const det8 = new Float32Array(roiSize);
+          const det16 = new Float32Array(roiSize);
+          const plane8 = new Float32Array(roiSize);
+          const plane16 = new Float32Array(roiSize);
+
+          for (let i = 0; i < roiSize; i++) {
+            const p8 = coeffs8[0] * normX[i] + coeffs8[1] * normY[i] + coeffs8[2];
+            const p16 = coeffs16[0] * normX[i] + coeffs16[1] * normY[i] + coeffs16[2];
+            plane8[i] = p8;
+            plane16[i] = p16;
+            det8[i] = patch8[i] - p8;
+            det16[i] = patch16[i] - p16;
           }
 
-          // Estimate local high-frequency sensor grain on clean ring
-          let grainStd8 = 0;
-          let grainStd16 = 0;
-          if (preserveGrain && ringXs.length >= 12) {
-            const blur8 = gaussianBlurFloat32(patch8, rw, rh, 1.2);
-            const blur16 = gaussianBlurFloat32(patch16, rw, rh, 1.2);
-            const hf8 = new Float32Array(ringXs.length);
-            const hf16 = new Float32Array(ringXs.length);
-            for (let i = 0; i < ringXs.length; i++) {
-              const rIdx = ringYs[i] * rw + ringXs[i];
-              hf8[i] = Math.abs(patch8[rIdx] - blur8[rIdx]);
-              hf16[i] = Math.abs(patch16[rIdx] - blur16[rIdx]);
-            }
-            hf8.sort();
-            hf16.sort();
-            grainStd8 = Math.min(3.5, hf8[ringXs.length >> 1] * 1.4826);
-            grainStd16 = Math.min(450.0, hf16[ringXs.length >> 1] * 1.4826);
+          const filledDet8 = inpaintDetrendedPatch(det8, roiExpanded, rw, rh, harmSigma);
+          const filledDet16 = inpaintDetrendedPatch(det16, roiExpanded, rw, rh, harmSigma);
+
+          healedPatch8 = new Float32Array(roiSize);
+          healedPatch16 = new Float32Array(roiSize);
+          for (let i = 0; i < roiSize; i++) {
+            healedPatch8[i] = plane8[i] + filledDet8[i];
+            healedPatch16[i] = plane16[i] + filledDet16[i];
           }
+        } else {
+          healedPatch8 = inpaintDetrendedPatch(patch8, roiExpanded, rw, rh, harmSigma);
+          healedPatch16 = inpaintDetrendedPatch(patch16, roiExpanded, rw, rh, harmSigma);
+        }
 
-          let healedPatch8: Float32Array;
-          let healedPatch16: Float32Array;
+        for (let ry = 0; ry < rh; ry++) {
+          const fy = by1 + ry;
+          const rOff = ry * rw;
+          const fOff = fy * fullW;
+          for (let rx = 0; rx < rw; rx++) {
+            const rIdx = rOff + rx;
+            const alpha = roiAlpha[rIdx];
+            if (alpha <= 1e-4) continue;
 
-          if (cleanIndices) {
-            const nC = cleanIndices.length;
-            const cxArr = new Float32Array(nC);
-            const cyArr = new Float32Array(nC);
-            const cv8 = new Float32Array(nC);
-            const cv16 = new Float32Array(nC);
-            for (let i = 0; i < nC; i++) {
-              const idx = cleanIndices[i];
-              const rIdx = ringYs[idx] * rw + ringXs[idx];
-              cxArr[i] = normX[rIdx];
-              cyArr[i] = normY[rIdx];
-              cv8[i] = patch8[rIdx];
-              cv16[i] = patch16[rIdx];
-            }
-            const coeffs8 = fastFitPlane(cxArr, cyArr, cv8, nC);
-            const coeffs16 = fastFitPlane(cxArr, cyArr, cv16, nC);
+            const gNoise = preserveGrain ? randNorm() : 0;
+            const h8 = healedPatch8[rIdx] + gNoise * grainStd8 * 0.85;
+            const h16 = healedPatch16[rIdx] + gNoise * grainStd16 * 0.85;
 
-            const det8 = new Float32Array(roiSize);
-            const det16 = new Float32Array(roiSize);
-            const plane8 = new Float32Array(roiSize);
-            const plane16 = new Float32Array(roiSize);
+            const b8 = base8[rIdx] * (1.0 - alpha) + h8 * alpha;
+            const b16 = base16[rIdx] * (1.0 - alpha) + h16 * alpha;
 
-            for (let i = 0; i < roiSize; i++) {
-              const p8 = coeffs8[0] * normX[i] + coeffs8[1] * normY[i] + coeffs8[2];
-              const p16 = coeffs16[0] * normX[i] + coeffs16[1] * normY[i] + coeffs16[2];
-              plane8[i] = p8;
-              plane16[i] = p16;
-              det8[i] = patch8[i] - p8;
-              det16[i] = patch16[i] - p16;
-            }
-
-            const filledDet8 = inpaintDetrendedPatch(det8, roiExpanded, rw, rh, harmSigma);
-            const filledDet16 = inpaintDetrendedPatch(det16, roiExpanded, rw, rh, harmSigma);
-
-            healedPatch8 = new Float32Array(roiSize);
-            healedPatch16 = new Float32Array(roiSize);
-            for (let i = 0; i < roiSize; i++) {
-              healedPatch8[i] = plane8[i] + filledDet8[i];
-              healedPatch16[i] = plane16[i] + filledDet16[i];
-            }
-          } else {
-            healedPatch8 = inpaintDetrendedPatch(patch8, roiExpanded, rw, rh, harmSigma);
-            healedPatch16 = inpaintDetrendedPatch(patch16, roiExpanded, rw, rh, harmSigma);
-          }
-
-          for (let ry = 0; ry < rh; ry++) {
-            const fy = by1 + ry;
-            const rOff = ry * rw;
-            const fOff = fy * fullW;
-            for (let rx = 0; rx < rw; rx++) {
-              const rIdx = rOff + rx;
-              const alpha = roiAlpha[rIdx];
-              if (alpha <= 1e-4) continue; // Zero-Touch Outside Mask!
-
-              const gNoise = preserveGrain ? randNorm() : 0;
-              const h8 = healedPatch8[rIdx] + gNoise * grainStd8 * 0.85;
-              const h16 = healedPatch16[rIdx] + gNoise * grainStd16 * 0.85;
-
-              const b8 = patch8[rIdx] * (1.0 - alpha) + h8 * alpha;
-              const b16 = patch16[rIdx] * (1.0 - alpha) + h16 * alpha;
-
-              const pIdx = (fOff + bx1 + rx) * 3 + ch;
-              healedRgb8[pIdx] = Math.max(0, Math.min(255, Math.round(b8)));
-              healedLinear16[pIdx] = Math.max(0, Math.min(65535, Math.round(b16)));
-            }
+            const pIdx = (fOff + bx1 + rx) * 3 + ch;
+            healedRgb8[pIdx] = Math.max(0, Math.min(255, Math.round(b8)));
+            healedLinear16[pIdx] = Math.max(0, Math.min(65535, Math.round(b16)));
           }
         }
       }
     }
+  }
 
-  const workHealedRgb8 = resizeRgb8Area(healedRgb8, fullW, fullH, workW, workH);
+  let workHealedRgb8: Uint8Array;
+  if (canUseIncremental && existingCheckpoint?.workHealedRgb8) {
+    workHealedRgb8 = existingCheckpoint.workHealedRgb8;
+    const dirtyBoxes = [...restoredBoxes, ...healedBoxes];
+    const scaleX = fullW / workW;
+    const scaleY = fullH / workH;
+    for (const [bx1, by1, bx2, by2] of dirtyBoxes) {
+      const wx1 = Math.max(0, Math.floor(bx1 * workScale) - 1);
+      const wy1 = Math.max(0, Math.floor(by1 * workScale) - 1);
+      const wx2 = Math.min(workW, Math.ceil(bx2 * workScale) + 1);
+      const wy2 = Math.min(workH, Math.ceil(by2 * workScale) + 1);
+      for (let wy = wy1; wy < wy2; wy++) {
+        const sy0 = Math.floor(wy * scaleY);
+        const sy1 = Math.max(sy0 + 1, Math.min(fullH, Math.ceil((wy + 1) * scaleY)));
+        for (let wx = wx1; wx < wx2; wx++) {
+          const sx0 = Math.floor(wx * scaleX);
+          const sx1 = Math.max(sx0 + 1, Math.min(fullW, Math.ceil((wx + 1) * scaleX)));
+          let rSum = 0,
+            gSum = 0,
+            bSum = 0,
+            cnt = 0;
+          for (let sy = sy0; sy < sy1; sy++) {
+            const sRow = sy * fullW;
+            for (let sx = sx0; sx < sx1; sx++) {
+              const idx = (sRow + sx) * 3;
+              rSum += healedRgb8[idx];
+              gSum += healedRgb8[idx + 1];
+              bSum += healedRgb8[idx + 2];
+              cnt++;
+            }
+          }
+          const dIdx = (wy * workW + wx) * 3;
+          workHealedRgb8[dIdx] = Math.round(rSum / cnt);
+          workHealedRgb8[dIdx + 1] = Math.round(gSum / cnt);
+          workHealedRgb8[dIdx + 2] = Math.round(bSum / cnt);
+        }
+      }
+    }
+  } else {
+    workHealedRgb8 = resizeRgb8Area(healedRgb8, fullW, fullH, workW, workH);
+  }
+
   const workMaskU8 = new Uint8Array(workW * workH);
   for (let wy = 0; wy < workH; wy++) {
     const fy = Math.min(fullH - 1, Math.round(wy / workScale));
@@ -1882,10 +2142,23 @@ export function inpaint16BitAndCameraRgbLocal(
     inpaintedPixels,
     inpaintedAreaPct: Math.round((inpaintedPixels / (fullW * fullH)) * 1000000) / 10000,
     bitDepth: '16-bit Linear + 1:1 Original Camera Color Profile',
-    inpaintMethod: 'Zero-Touch Outside Mask + Plane-Detrended 16-bit Harmonic Inpainting',
+    inpaintMethod: 'Incremental Checkpoint + Zero-Touch 16-bit Harmonic Inpainting',
     inpaintRadius: inpaintR,
     fullWidth: fullW,
     fullHeight: fullH,
+    fromCache: false,
+    incrementalRois: healedBoxes.length + restoredBoxes.length,
+  };
+
+  const nextCheckpoint: LocalCheckpointState = {
+    healedRgb8,
+    healedLinear16,
+    workHealedRgb8,
+    workMaskU8,
+    bakedSpots: currSpotsMap,
+    bakedStrokes: currStrokesMap,
+    bakedParamsSig: currentParamsSig,
+    lastInpaintResult: inpaintResult,
   };
 
   onProgress?.(100, '복원 완료');
@@ -1896,6 +2169,7 @@ export function inpaint16BitAndCameraRgbLocal(
     workHealedRgb8,
     workMaskU8,
     inpaintResult,
+    checkpoint: nextCheckpoint,
   };
 }
 

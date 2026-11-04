@@ -15,6 +15,7 @@ import {
   computeDetGrayFromRgb8,
   detectSensorDustLocal,
   inpaint16BitAndCameraRgbLocal,
+  LocalCheckpointState,
   resizeRgb8Area,
   runMultiFrameClustering,
 } from '../engine/dustAlgorithms';
@@ -43,6 +44,7 @@ interface WorkerSessionData {
   detGray: Float32Array;
   healedRgb8?: Uint8Array;
   healedLinear16?: Uint16Array;
+  checkpoint?: LocalCheckpointState;
   rawIccProfileBytes?: Uint8Array;
   lastDetection?: DetectionResult;
 }
@@ -153,6 +155,7 @@ async function processSingleIngestAndDetect(
     originalFileName: fileName,
     extension: decoded.extension,
     isRaw: decoded.isRaw,
+    isLinear16: decoded.isLinear16 ?? true,
     fullWidth: fullW,
     fullHeight: fullH,
     workWidth: workW,
@@ -382,8 +385,8 @@ self.onmessage = async (event: MessageEvent) => {
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 10, '16-bit 패치 매칭 및 스팟 복원 시작');
-      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
+      sendProgress(id, 10, '16-bit 증분 체크포인트 복원 중');
+      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult, checkpoint } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
           session.linear16,
@@ -399,11 +402,13 @@ self.onmessage = async (event: MessageEvent) => {
           (inpaintPct, inpaintLabel) => {
             const mapped = Math.round(10 + (inpaintPct / 100) * 80); // 10% ~ 90%
             sendProgress(id, mapped, inpaintLabel);
-          }
+          },
+          session.checkpoint
         );
 
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
+      session.checkpoint = checkpoint;
 
       sendProgress(id, 92, '복원 미리보기 캔버스 인코딩 중');
       const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
@@ -442,13 +447,13 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 5, '1:1 원본 해상도 렌더링 준비');
+      sendProgress(id, 5, '1:1 원본 해상도 무손실 내보내기 준비');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 10, '1:1 버퍼 생성 & 먼지 제거 복원 시작');
-      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
+      sendProgress(id, 15, '임시 저장본 확인 및 1:1 버퍼 검증 중');
+      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult, checkpoint } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
           session.linear16,
@@ -462,13 +467,15 @@ self.onmessage = async (event: MessageEvent) => {
           inpaintRadius,
           preserveGrain,
           (inpaintPct, inpaintLabel) => {
-            const mapped = Math.round(10 + (inpaintPct / 100) * 55); // 10% ~ 65%
+            const mapped = Math.round(15 + (inpaintPct / 100) * 50); // 15% ~ 65%
             sendProgress(id, mapped, inpaintLabel);
-          }
+          },
+          session.checkpoint
         );
 
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
+      session.checkpoint = checkpoint;
 
       sendProgress(id, 70, `${format.toUpperCase()} 파일 포맷 무손실 인코딩 중`);
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
@@ -641,7 +648,7 @@ self.onmessage = async (event: MessageEvent) => {
 
         const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
 
-        const { healedRgb8, healedLinear16 } = inpaint16BitAndCameraRgbLocal(
+        const { healedRgb8, healedLinear16, checkpoint } = inpaint16BitAndCameraRgbLocal(
           sess.origRgb8,
           sess.linear16,
           fullWidth,
@@ -656,8 +663,10 @@ self.onmessage = async (event: MessageEvent) => {
           (inpaintPct, inpaintLabel) => {
             const currentPct = Math.round(frameStartPct + (inpaintPct / 100) * (frameEndPct - frameStartPct) * 0.7);
             sendProgress(id, currentPct, `배치 [${i + 1}/${total}] ${inpaintLabel}`);
-          }
+          },
+          sess.checkpoint
         );
+        sess.checkpoint = checkpoint;
 
         sendProgress(id, Math.round(frameStartPct + (frameEndPct - frameStartPct) * 0.75), `배치 [${i + 1}/${total}] ${format.toUpperCase()} 인코딩 중`);
         const { blob, ext } = await renderExportBuffer(

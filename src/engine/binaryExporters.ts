@@ -686,16 +686,8 @@ export function writeLinearDngBuffer(
 
   const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
   const profileName = COLOR_SPACE_DEFS[effectiveSpace]?.name || 'Adobe RGB (1998)';
-
-  const profileToneCurveFloats = [
-    0.0, 0.0,
-    0.06, 0.038,
-    0.15, 0.125,
-    0.35, 0.365,
-    0.65, 0.705,
-    0.85, 0.895,
-    1.0, 1.0,
-  ];
+  const exposureScale = Math.max(0.25, Number(meta.exposureScale || 1.0));
+  const baselineEvNum = Math.round(Math.log2(exposureScale) * 100);
 
   const prevByteCount = prevW * prevH * 3;
   const raw16ByteCount = fullW * fullH * 3 * 2;
@@ -747,9 +739,9 @@ export function writeLinearDngBuffer(
     makeAsciiTag(50708, uniqueModel), // UniqueCameraModel
     makeSRationalTag(50721, colorMatrix1), // ColorMatrix1
     makeRationalTag(50728, [[10000, 10000], [10000, 10000], [10000, 10000]]), // AsShotNeutral
+    makeSRationalTag(50730, [[baselineEvNum, 100]]), // BaselineExposure (zero highlight clipping!)
     makeShortTag(50740, [21]), // CalibrationIlluminant1 = D65
     makeAsciiTag(50936, profileName), // ProfileName
-    makeFloatTag(50940, profileToneCurveFloats), // ProfileToneCurve
   ];
 
   if (meta.exif?.artist) ifd0Entries.push(makeAsciiTag(315, meta.exif.artist));
@@ -869,12 +861,25 @@ export function writeTiff16Buffer(
   writeIfdBlock(view, 8, entries, 0);
   writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
 
-  // Expand camera-accurate healedRgb8 to 16-bit with low-order bit precision from healedLinear16
+  // Write true 16-bit lossless samples from healedLinear16 (preserving 100% of 16-bit DR)
   const dst16 = new Uint16Array(buffer, stripOffset, numSamples);
-  for (let i = 0; i < numSamples; i++) {
-    const v8 = healedRgb8[i];
-    const subLsb = healedLinear16[i] & 0xff;
-    dst16[i] = v8 === 255 ? 65535 : v8 === 0 ? 0 : (v8 << 8) | subLsb;
+  if (meta.isLinear16 === false) {
+    // Already in perceptual 16-bit space (e.g. 16-bit TIFF input) -> copy 1:1 with zero transformation
+    dst16.set(healedLinear16);
+  } else {
+    // Convert 16-bit linear (0..65535) to 16-bit sRGB/AdobeRGB gamma (0..65535) with unclipped full dynamic range
+    const linToGamma16 = new Uint16Array(65536);
+    for (let v = 0; v < 65536; v++) {
+      const norm = v / 65535.0;
+      const g =
+        norm <= 0.0031308
+          ? norm * 12.92
+          : 1.055 * Math.pow(Math.max(norm, 1e-8), 1.0 / 2.4) - 0.055;
+      linToGamma16[v] = Math.max(0, Math.min(65535, Math.round(g * 65535.0)));
+    }
+    for (let i = 0; i < numSamples; i++) {
+      dst16[i] = linToGamma16[healedLinear16[i]];
+    }
   }
 
   return buffer;
