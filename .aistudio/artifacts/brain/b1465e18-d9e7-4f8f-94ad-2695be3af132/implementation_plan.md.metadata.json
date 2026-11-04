@@ -1,6 +1,6 @@
 {
-  "summary": "라이트룸 사전 처리용 무손실 16-bit RAW/DNG/TIFF 파이프라인 개선, 복원 결과 임시 저장 기반의 실시간 부분(ROI) 증분 복원/원복 엔진, 중복 연산 없는 즉시 내보내기, 그리고 2종 펜툴(스팟 추가 펜 / 스팟 제거 펜) 통합에 대한 아키텍처 및 구현 계획서입니다.",
-  "updatedAt": "2026-11-04T11:32:36.727982429Z",
+  "summary": "Implementation plan for separating the crowded bottom toolbar into a Left Vertical Toolbar (Pens, Hand Pan Tool, Pen Size, Undo/Redo) and a compact Bottom Bar (View Modes, Overlay, Zoom) without horizontal scroll, plus adding full vertical/horizontal panning when zoomed in via Mouse Wheel, Spacebar + Drag, and a dedicated Hand (Pan) tool.",
+  "updatedAt": "2026-11-04T12:03:44.291911542Z",
   "requestFeedback": true,
   "userFacing": true
 }

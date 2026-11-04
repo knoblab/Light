@@ -21,6 +21,7 @@ import {
   X,
   Plus,
   Search,
+  Hand,
 } from 'lucide-react';
 import {
   ColorSpaceId,
@@ -1711,10 +1712,10 @@ export function App() {
             </button>
           </div>
 
-          {/* Mobile Tab 1: Tools (Simplified 2 Pens) */}
+          {/* Mobile Tab 1: Tools (2 Pens + Hand Pan) */}
           {mobileTab === 'tools' && (
             <div className="space-y-2.5">
-              <div className="grid grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-3 gap-1.5">
                 <button
                   type="button"
                   onClick={() => setInteractionTool('pen-add')}
@@ -1738,6 +1739,18 @@ export function App() {
                 >
                   <Eraser className="w-4 h-4" />
                   <span>스팟 제거 펜</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setInteractionTool('pan')}
+                  className={`min-h-[44px] rounded flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+                    interactionTool === 'pan'
+                      ? 'bg-[#556042] text-white'
+                      : 'bg-[#2B2B2E] text-[#C2C1BB]'
+                  }`}
+                >
+                  <Hand className="w-4 h-4" />
+                  <span>화면 이동</span>
                 </button>
               </div>
 

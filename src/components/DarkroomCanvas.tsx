@@ -12,6 +12,7 @@ import {
   Redo2,
   Minus,
   Plus,
+  Hand,
 } from 'lucide-react';
 import {
   DetectedDustSpot,
@@ -108,6 +109,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState<boolean>(false);
+  const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
   const [panStart, setPanStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDrawingStroke, setIsDrawingStroke] = useState<boolean>(false);
   const [currentPoints, setCurrentPoints] = useState<Array<{ x: number; y: number }>>([]);
@@ -117,15 +119,38 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   const [isDragOver, setIsDragOver] = useState<boolean>(false);
   const [showSpotLabels, setShowSpotLabels] = useState<boolean>(false);
 
+  const clampPanOffset = useCallback(
+    (nextX: number, nextY: number, targetZoom: number) => {
+      if (targetZoom <= 1) {
+        return { x: 0, y: 0 };
+      }
+      const container = containerRef.current;
+      const maxX = container ? Math.max(240, container.clientWidth * (targetZoom - 0.35)) : 1200;
+      const maxY = container ? Math.max(240, container.clientHeight * (targetZoom - 0.35)) : 1200;
+      return {
+        x: Math.max(-maxX, Math.min(maxX, nextX)),
+        y: Math.max(-maxY, Math.min(maxY, nextY)),
+      };
+    },
+    []
+  );
+
   useEffect(() => {
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }, [meta?.originalFileName]);
 
-  // Keyboard shortcuts for simplified 2-pen workflow
+  // Keyboard shortcuts for 2-pen + Hand pan workflow, Spacebar panning, and Arrow key movement
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        setIsSpacePressed(true);
+        return;
+      }
+
       const k = e.key.toLowerCase();
       if ((e.metaKey || e.ctrlKey) && k === 'z') {
         e.preventDefault();
@@ -142,6 +167,18 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         return;
       }
 
+      // When zoomed in, allow Up/Down/Left/Right arrow keys to move the image smoothly
+      if (zoom > 1 && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        const step = e.shiftKey ? 120 : 48;
+        setPan((prev) => {
+          const dx = e.key === 'ArrowLeft' ? step : e.key === 'ArrowRight' ? -step : 0;
+          const dy = e.key === 'ArrowUp' ? step : e.key === 'ArrowDown' ? -step : 0;
+          return clampPanOffset(prev.x + dx, prev.y + dy, zoom);
+        });
+        return;
+      }
+
       if (e.key === '[') {
         onChangeBrushRadius(Math.max(4, brushRadius - 4));
       } else if (e.key === ']') {
@@ -152,18 +189,41 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         onChangeInteractionTool('pen-add');
       } else if (k === 'e' || k === '2' || k === 'd') {
         onChangeInteractionTool('pen-remove');
+      } else if (k === 'h' || k === '3') {
+        onChangeInteractionTool('pan');
       } else if (k === '\\') {
         onChangeComparisonMode(
           comparisonMode === 'original-only' ? 'healed-only' : 'original-only'
         );
       }
     };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+        setIsPanning(false);
+      }
+    };
+
+    const handleWindowBlur = () => {
+      setIsSpacePressed(false);
+      setIsPanning(false);
+    };
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+    };
   }, [
     brushRadius,
     showDustOverlay,
     comparisonMode,
+    zoom,
+    clampPanOffset,
     onChangeBrushRadius,
     onToggleDustOverlay,
     onChangeInteractionTool,
@@ -375,8 +435,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
       }
     }
 
-    // Active pen cursor ring
-    if (cursorImgPos) {
+    // Active pen cursor ring (hidden when using Hand Pan tool or holding Spacebar)
+    if (cursorImgPos && interactionTool !== 'pan' && !isSpacePressed && !isPanning) {
       const cursorX = cursorImgPos.x * scale;
       const cursorY = cursorImgPos.y * scale;
       const r = Math.max(4, brushRadius * scale);
@@ -421,14 +481,49 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     cursorImgPos,
     filterMode,
     showSpotLabels,
+    isSpacePressed,
+    isPanning,
     isPointHitByPath,
   ]);
+
+  // Wheel handler: vertical/horizontal movement when zoomed in, or Ctrl+Wheel for zoom
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!meta || isProcessing) return;
+    e.preventDefault();
+
+    if (e.ctrlKey || e.metaKey) {
+      const zoomDelta = e.deltaY < 0 ? 0.25 : -0.25;
+      setZoom((prevZoom) => {
+        const nextZoom = Math.max(0.5, Math.min(4.0, Number((prevZoom + zoomDelta).toFixed(2))));
+        setPan((prevPan) => clampPanOffset(prevPan.x, prevPan.y, nextZoom));
+        return nextZoom;
+      });
+      return;
+    }
+
+    // When zoomed in, scrolling the wheel moves the photo up/down (or left/right with Shift / trackpad)
+    if (zoom > 1) {
+      const deltaX = e.shiftKey && Math.abs(e.deltaX) < 1 ? e.deltaY : e.deltaX;
+      const deltaY = e.shiftKey && Math.abs(e.deltaX) < 1 ? 0 : e.deltaY;
+      setPan((prev) => clampPanOffset(prev.x - deltaX, prev.y - deltaY, zoom));
+    } else if (Math.abs(e.deltaY) > 15) {
+      // If at 100% zoom and scrolling up, allow zooming in smoothly
+      if (e.deltaY < 0) {
+        setZoom((z) => Math.min(4.0, Number((z + 0.25).toFixed(2))));
+      }
+    }
+  };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!meta || isProcessing) return;
     e.currentTarget.setPointerCapture(e.pointerId);
 
-    if (e.button === 1 || e.shiftKey) {
+    if (
+      interactionTool === 'pan' ||
+      isSpacePressed ||
+      e.button === 1 ||
+      e.shiftKey
+    ) {
       setIsPanning(true);
       setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
       return;
@@ -445,7 +540,9 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     if (!meta) return;
 
     if (isPanning) {
-      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
+      const nextX = e.clientX - panStart.x;
+      const nextY = e.clientY - panStart.y;
+      setPan(clampPanOffset(nextX, nextY, Math.max(1.15, zoom)));
       return;
     }
 
@@ -644,6 +741,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   return (
     <div
       ref={containerRef}
+      onWheel={handleWheel}
       onDragOver={(e) => {
         e.preventDefault();
         setIsDragOver(true);
@@ -714,7 +812,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                   src={urls.previewInpainted}
                   alt={meta.originalFileName}
                   referrerPolicy="no-referrer"
-                  className="block max-h-[calc(100dvh-130px)] md:max-h-[calc(100dvh-110px)] max-w-[calc(100vw-16px)] md:max-w-[calc(100vw-350px)] w-auto h-auto object-contain pointer-events-none"
+                  className="block max-h-[calc(100dvh-130px)] md:max-h-[calc(100dvh-110px)] max-w-[calc(100vw-16px)] md:max-w-[calc(100vw-380px)] w-auto h-auto object-contain pointer-events-none"
                 />
                 <div
                   style={{ clipPath: `inset(0 ${100 - splitPosition}% 0 0)` }}
@@ -745,7 +843,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 src={getPrimaryImageUrl() || urls.previewOriginal}
                 alt={meta.originalFileName}
                 referrerPolicy="no-referrer"
-                className="block max-h-[calc(100dvh-130px)] md:max-h-[calc(100dvh-110px)] max-w-[calc(100vw-16px)] md:max-w-[calc(100vw-350px)] w-auto h-auto object-contain pointer-events-none"
+                className="block max-h-[calc(100dvh-130px)] md:max-h-[calc(100dvh-110px)] max-w-[calc(100vw-16px)] md:max-w-[calc(100vw-380px)] w-auto h-auto object-contain pointer-events-none"
               />
             )}
 
@@ -757,7 +855,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               onPointerLeave={() => {
                 setCursorImgPos(null);
               }}
-              className="absolute inset-0 w-full h-full touch-none cursor-crosshair"
+              className={`absolute inset-0 w-full h-full touch-none ${
+                isPanning
+                  ? 'cursor-grabbing'
+                  : interactionTool === 'pan' || isSpacePressed
+                  ? 'cursor-grab'
+                  : 'cursor-crosshair'
+              }`}
             />
           </div>
 
@@ -769,78 +873,89 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             </div>
           )}
 
-          {/* Unified Darkroom HUD Dock: Simplified 2-Pen Bar */}
-          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#3A3A3D]/95 backdrop-blur-md border border-[#535356] shadow-xl max-w-[96vw] overflow-x-auto text-[#E7E6E1]">
-            {/* Simplified 2-Pen Selector */}
-            <div className="flex items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0 gap-0.5">
+          {/* 1. LEFT VERTICAL TOOLBAR: Pens, Hand (Move) Tool, Pen Size, Undo/Redo */}
+          <div className="hidden md:flex absolute left-3 top-1/2 -translate-y-1/2 z-20 flex-col items-center gap-1.5 p-1.5 rounded-lg bg-[#3A3A3D]/95 backdrop-blur-md border border-[#535356] shadow-xl text-[#E7E6E1]">
+            {/* Tool Selector Stack */}
+            <div className="flex flex-col items-center p-0.5 bg-[#2B2B2E] border border-[#535356] rounded gap-1 w-full">
               <button
                 type="button"
                 onClick={() => onChangeInteractionTool('pen-add')}
-                title="스팟 추가 펜 (B) — 클릭: 원형 스팟 찍기 / 드래그: 연속 브러시 복원"
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                  interactionTool === 'pen-add'
+                title="스팟 추가 펜 (B) — 클릭: 단일 원형 스팟 찍기 / 드래그: 연속 브러시 칠하기"
+                className={`w-14 py-2 rounded-xs flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  interactionTool === 'pen-add' && !isSpacePressed
                     ? 'bg-[#556042] text-[#F7F6F2]'
                     : 'text-[#888783] hover:text-[#C2C1BB]'
                 }`}
               >
-                <PlusCircle className="w-3.5 h-3.5" />
-                <span>스팟 추가 펜</span>
+                <PlusCircle className="w-4 h-4" />
+                <span>추가 펜</span>
               </button>
+
               <button
                 type="button"
                 onClick={() => onChangeInteractionTool('pen-remove')}
                 title="스팟 제거 펜 (E) — 클릭 또는 드래그로 자동 인식 먼지 해제 및 수동 스팟 원복"
-                className={`flex items-center gap-1 px-2.5 py-1 rounded-xs text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                  interactionTool === 'pen-remove'
+                className={`w-14 py-2 rounded-xs flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  interactionTool === 'pen-remove' && !isSpacePressed
                     ? 'bg-[#556042] text-[#F7F6F2]'
                     : 'text-[#888783] hover:text-[#C2C1BB]'
                 }`}
               >
-                <Eraser className="w-3.5 h-3.5" />
-                <span>스팟 제거 펜</span>
+                <Eraser className="w-4 h-4" />
+                <span>제거 펜</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onChangeInteractionTool('pan')}
+                title="손바닥 이동 도구 (H 또는 Space+드래그) — 드래그하여 확대된 사진을 상하좌우로 이동"
+                className={`w-14 py-2 rounded-xs flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                  interactionTool === 'pan' || isSpacePressed
+                    ? 'bg-[#556042] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#C2C1BB]'
+                }`}
+              >
+                <Hand className="w-4 h-4" />
+                <span>이동</span>
               </button>
             </div>
 
-            {/* Pen Size Controls (Always visible for both pens) */}
-            <div className="flex items-center gap-1.5 px-2 py-0.5 bg-[#2B2B2E] border border-[#535356] rounded shrink-0">
-              <button
-                type="button"
-                onClick={() => onChangeBrushRadius(Math.max(4, brushRadius - 4))}
-                title="펜 크기 축소 ([)"
-                className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
-              >
-                <Minus className="w-3 h-3" />
-              </button>
-              <input
-                type="range"
-                min={4}
-                max={120}
-                value={brushRadius}
-                onChange={(e) => onChangeBrushRadius(Number(e.target.value))}
-                className="lr-slider w-14"
-                title="펜 반경 조절"
-              />
+            <div className="w-full h-[1px] bg-[#535356]" />
+
+            {/* Compact Vertical Pen Radius Control */}
+            <div className="flex flex-col items-center gap-1 py-1 px-1 bg-[#2B2B2E] border border-[#535356] rounded w-full">
+              <span className="text-[9px] text-[#888783] whitespace-nowrap">펜 크기</span>
               <button
                 type="button"
                 onClick={() => onChangeBrushRadius(Math.min(120, brushRadius + 4))}
                 title="펜 크기 확대 (])"
-                className="p-0.5 text-[#888783] hover:text-[#E7E6E1] cursor-pointer"
+                className="w-full py-1 rounded hover:bg-[#3A3A3D] text-[#C2C1BB] hover:text-[#F7F6F2] flex items-center justify-center cursor-pointer"
               >
-                <Plus className="w-3 h-3" />
+                <Plus className="w-3.5 h-3.5" />
               </button>
-              <span className="text-[10px] font-medium text-[#E7E6E1] tabular-nums w-7 text-right">
+              <span className="text-[11px] font-semibold text-[#E7E6E1] tabular-nums">
                 {brushRadius}px
               </span>
+              <button
+                type="button"
+                onClick={() => onChangeBrushRadius(Math.max(4, brushRadius - 4))}
+                title="펜 크기 축소 ([)"
+                className="w-full py-1 rounded hover:bg-[#3A3A3D] text-[#C2C1BB] hover:text-[#F7F6F2] flex items-center justify-center cursor-pointer"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
             </div>
 
-            {/* History Undo / Redo */}
-            <div className="flex items-center gap-0.5 shrink-0">
+            <div className="w-full h-[1px] bg-[#535356]" />
+
+            {/* Undo / Redo Row */}
+            <div className="grid grid-cols-2 gap-1 w-full">
               <button
                 type="button"
                 onClick={onUndo}
                 disabled={!canUndo}
                 title="되돌리기 (Ctrl+Z)"
-                className="p-1.5 rounded text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#2B2B2E] disabled:opacity-30 transition-colors cursor-pointer"
+                className="py-1.5 rounded bg-[#2B2B2E] border border-[#535356] text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#535356] disabled:opacity-30 flex items-center justify-center transition-colors cursor-pointer"
               >
                 <Undo2 className="w-3.5 h-3.5" />
               </button>
@@ -849,14 +964,15 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 onClick={onRedo}
                 disabled={!canRedo}
                 title="다시 실행 (Ctrl+Y)"
-                className="p-1.5 rounded text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#2B2B2E] disabled:opacity-30 transition-colors cursor-pointer"
+                className="py-1.5 rounded bg-[#2B2B2E] border border-[#535356] text-[#C2C1BB] hover:text-[#F7F6F2] hover:bg-[#535356] disabled:opacity-30 flex items-center justify-center transition-colors cursor-pointer"
               >
                 <Redo2 className="w-3.5 h-3.5" />
               </button>
             </div>
+          </div>
 
-            <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
-
+          {/* 2. BOTTOM VIEW & ZOOM BAR (Compact, Zero Horizontal Scroll) */}
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#3A3A3D]/95 backdrop-blur-md border border-[#535356] shadow-xl max-w-[95vw] text-[#E7E6E1]">
             {/* Dust Overlay Eye Toggle */}
             <button
               type="button"
@@ -873,7 +989,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               ) : (
                 <EyeOff className="w-3.5 h-3.5" />
               )}
-              <span className="hidden sm:inline">오버레이</span>
+              <span>오버레이</span>
             </button>
 
             <button
@@ -906,7 +1022,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                   : 'text-[#888783] hover:text-[#F7F6F2]'
               }`}
             >
-              {hasInpaintedResult ? '임시저장 복원본' : '작업본'}
+              {hasInpaintedResult ? '복원본' : '작업본'}
             </button>
 
             {hasInpaintedResult && (
@@ -987,7 +1103,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             {/* Zoom Controls */}
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.25).toFixed(2))))}
+              onClick={() =>
+                setZoom((z) => {
+                  const next = Math.max(0.5, Number((z - 0.25).toFixed(2)));
+                  setPan((p) => clampPanOffset(p.x, p.y, next));
+                  return next;
+                })
+              }
               className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
               title="축소"
             >
@@ -998,7 +1120,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             </span>
             <button
               type="button"
-              onClick={() => setZoom((z) => Math.min(4.0, Number((z + 0.25).toFixed(2))))}
+              onClick={() =>
+                setZoom((z) => {
+                  const next = Math.min(4.0, Number((z + 0.25).toFixed(2)));
+                  setPan((p) => clampPanOffset(p.x, p.y, next));
+                  return next;
+                })
+              }
               className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
               title="확대"
             >
@@ -1011,7 +1139,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
                 setPan({ x: 0, y: 0 });
               }}
               className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
-              title="화면 맞춤"
+              title="화면 맞춤 (100%)"
             >
               <Maximize2 className="w-3.5 h-3.5" />
             </button>

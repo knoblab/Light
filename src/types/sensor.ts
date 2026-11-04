@@ -20,7 +20,7 @@ export interface DetailedProgressInfo {
 
 export type OverlayMode = 'red-circle' | 'bw-edge';
 
-export type InteractionTool = 'pen-add' | 'pen-remove';
+export type InteractionTool = 'pen-add' | 'pen-remove' | 'pan';
 
 export type ViewComparisonMode = 'working' | 'split' | 'original-only' | 'healed-only';
 
