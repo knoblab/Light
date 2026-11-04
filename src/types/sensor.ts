@@ -10,6 +10,14 @@ export interface ColorSpaceInfo {
   gamutCoverage: string;
 }
 
+export interface DetailedProgressInfo {
+  stepIndex: number; // 1..totalSteps
+  totalSteps: number; // e.g. 4
+  stepName: string; // e.g. "가우시안 차분 및 필터링"
+  stepPercent: number; // 0..100 within current step
+  overallPercent: number; // 0..100 overall
+}
+
 export type OverlayMode = 'red-circle' | 'bw-edge';
 
 export type InteractionTool = 'inspect' | 'deselect-brush' | 'brush-add' | 'brush-erase';

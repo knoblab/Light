@@ -27,6 +27,7 @@ import {
   DetectedDustSpot,
   DetectionMethod,
   DetectionParams,
+  DetailedProgressInfo,
   InpaintResult,
   InteractionTool,
   ManualBrushStroke,
@@ -148,12 +149,14 @@ export function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [processingLabel, setProcessingLabel] = useState<string>('');
   const [progressPercent, setProgressPercent] = useState<number>(0);
+  const [progressInfo, setProgressInfo] = useState<DetailedProgressInfo | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
 
-  const handleProgress = (percent: number, label?: string) => {
+  const handleProgress = (percent: number, label?: string, info?: DetailedProgressInfo) => {
     setProgressPercent(percent);
     if (label) setProcessingLabel(label);
+    if (info) setProgressInfo(info);
   };
 
   const topFileInputRef = useRef<HTMLInputElement>(null);
@@ -696,7 +699,7 @@ export function App() {
       <input
         ref={topFileInputRef}
         type="file"
-        accept=".rw2,.dng,.cr2,.cr3,.nef,.arw,.orf,.pef,.raf,.tif,.tiff,.png,.jpg,.jpeg"
+        accept=".rw2,.dng,.cr2,.cr3,.nef,.nrw,.raf,.arw,.orf,.pef,.srw,.3fr,.iiq,.rwl,.mos,.mrw,.fff,.tif,.tiff,.png,.jpg,.jpeg,image/*"
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) handleUploadFile(f);
@@ -708,7 +711,7 @@ export function App() {
         ref={multiFileInputRef}
         type="file"
         multiple
-        accept=".rw2,.dng,.cr2,.cr3,.nef,.arw,.orf,.pef,.raf,.tif,.tiff,.png,.jpg,.jpeg"
+        accept=".rw2,.dng,.cr2,.cr3,.nef,.nrw,.raf,.arw,.orf,.pef,.srw,.3fr,.iiq,.rwl,.mos,.mrw,.fff,.tif,.tiff,.png,.jpg,.jpeg,image/*"
         onChange={(e) => {
           if (e.target.files && e.target.files.length > 0) {
             handleMultiUploadFiles(e.target.files);
@@ -1024,6 +1027,7 @@ export function App() {
             isProcessing={isProcessing}
             processingLabel={processingLabel}
             progressPercent={progressPercent}
+            progressInfo={progressInfo}
             onUploadFile={handleUploadFile}
             onBeginHistoryBatch={pushHistorySnapshot}
             onBatchDeselectSpots={handleBatchDeselectSpots}

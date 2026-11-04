@@ -5,6 +5,7 @@ import {
   DetectedDustSpot,
   DetectionParams,
   DetectionResult,
+  DetailedProgressInfo,
   InpaintResult,
   ManualBrushStroke,
   SessionMetadata,
@@ -48,6 +49,39 @@ interface WorkerSessionData {
 
 const sessions = new Map<string, WorkerSessionData>();
 
+function sendDetailedProgress(
+  reqId: number,
+  stepIndex: number,
+  totalSteps: number,
+  stepName: string,
+  stepPercent: number,
+  overallPercent?: number
+) {
+  const stepW = 100 / Math.max(1, totalSteps);
+  const computedOverall =
+    overallPercent !== undefined
+      ? overallPercent
+      : Math.round(((stepIndex - 1) * 100 + stepPercent) / totalSteps);
+
+  const progressInfo: DetailedProgressInfo = {
+    stepIndex,
+    totalSteps,
+    stepName,
+    stepPercent: Math.min(100, Math.max(0, Math.round(stepPercent))),
+    overallPercent: Math.min(100, Math.max(0, Math.round(computedOverall))),
+  };
+
+  const label = `${stepIndex}/${totalSteps}단계 · ${stepName} (${progressInfo.stepPercent}%)`;
+
+  self.postMessage({
+    id: reqId,
+    type: 'progress',
+    percent: progressInfo.overallPercent,
+    label,
+    progressInfo,
+  });
+}
+
 function sendProgress(reqId: number, percent: number, label?: string) {
   self.postMessage({
     id: reqId,
@@ -64,9 +98,9 @@ async function processSingleIngestAndDetect(
   buffer: ArrayBuffer,
   params: DetectionParams
 ) {
-  sendProgress(reqId, 15, '파일 로딩 및 바이너리 읽는 중...');
+  sendDetailedProgress(reqId, 1, 4, '파일 디코딩 & RAW/TIFF 바이너리 파싱', 15);
   const decoded = await decodeImageFileLocal(fileName, buffer);
-  sendProgress(reqId, 45, '해상도 및 16-bit 메타데이터 파싱 중...');
+  sendDetailedProgress(reqId, 1, 4, '16-bit 메타데이터 & EXIF 태그 파싱', 85);
   const fullW = decoded.fullWidth;
   const fullH = decoded.fullHeight;
 
@@ -80,11 +114,13 @@ async function processSingleIngestAndDetect(
     workH = Math.max(1, Math.round(fullH * workScale));
   }
 
+  sendDetailedProgress(reqId, 2, 4, '작업 영역 리사이즈 및 그레이스케일 추출', 25);
   const workRgb8 =
     workW === fullW && workH === fullH
       ? new Uint8Array(decoded.origRgb8)
       : resizeRgb8Area(decoded.origRgb8, fullW, fullH, workW, workH);
 
+  sendDetailedProgress(reqId, 2, 4, '가우시안 차분(DoG) & 엣지 필터링', 60);
   const detGray = computeDetGrayFromRgb8(workRgb8, workW, workH);
 
   // Compute 16-bit stats
@@ -141,6 +177,7 @@ async function processSingleIngestAndDetect(
     exif: decoded.exif,
   };
 
+  sendDetailedProgress(reqId, 3, 4, '블롭 연결성 분석 및 먼지 스팟 도출', 35);
   const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
     detGray,
     workW,
@@ -152,6 +189,7 @@ async function processSingleIngestAndDetect(
     workScale,
     params
   );
+  sendDetailedProgress(reqId, 3, 4, '스팟 신뢰도 산출 및 역광 임계값 필터링', 90);
 
   sessions.set(sessionId, {
     sessionId,
@@ -164,7 +202,7 @@ async function processSingleIngestAndDetect(
     lastDetection: detectionResult,
   });
 
-  sendProgress(reqId, 75, '미리보기 캔버스 생성 중...');
+  sendDetailedProgress(reqId, 4, 4, '1:1 미리보기 캔버스 생성 및 이미지 인코딩', 50);
 
   const [previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
     encodeRgb8ToBlob(workRgb8, workW, workH, 'image/jpeg', 0.96),
@@ -172,7 +210,7 @@ async function processSingleIngestAndDetect(
     encodeMaskU8ToBlob(maskAutoU8, workW, workH),
   ]);
 
-  sendProgress(reqId, 100, '로딩 완료');
+  sendDetailedProgress(reqId, 4, 4, '이미지 로딩 및 분석 완료', 100);
 
   return {
     sessionId,
@@ -281,12 +319,12 @@ self.onmessage = async (event: MessageEvent) => {
 
     if (action === 'detect') {
       const { sessionId, params } = payload;
-      sendProgress(id, 20, '그레이스케일 변환 및 오버레이 분석 준비 중...');
+      sendDetailedProgress(id, 1, 4, '메타데이터 & 이미지 그레이스케일 준비', 25);
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 50, '센서 먼지 엣지 필터링 중...');
+      sendDetailedProgress(id, 2, 4, '가우시안 차분(DoG) & 다중 스케일 탐지', 60);
       const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
         session.detGray,
         workWidth,
@@ -300,13 +338,14 @@ self.onmessage = async (event: MessageEvent) => {
       );
       session.lastDetection = detectionResult;
 
-      sendProgress(id, 85, '스팟 클러스터링 계산 및 미리보기 생성 중...');
+      sendDetailedProgress(id, 3, 4, '블롭 스팟 클러스터링 및 신뢰도 검증', 80);
+      sendDetailedProgress(id, 4, 4, '미리보기 캔버스 생성 및 인코딩', 40);
       const [vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
         encodeRgb8ToBlob(vizBwEdgeRgb8, workWidth, workHeight, 'image/jpeg', 0.92),
         encodeMaskU8ToBlob(maskAutoU8, workWidth, workHeight),
       ]);
 
-      sendProgress(id, 100, '분석 완료');
+      sendDetailedProgress(id, 4, 4, '먼지 탐지 분석 완료', 100);
       self.postMessage({
         id,
         ok: true,
@@ -333,12 +372,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 20, '마스크 렌더링 및 알고리즘 준비 중...');
+      sendDetailedProgress(id, 1, 4, '마스크 오버레이 렌더링 & ROI 영역 구별', 30);
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 50, '패치 매칭 및 스팟 제거 인페인팅 적용 중...');
+      sendDetailedProgress(id, 2, 4, '16-bit 패치 매칭 & Fast Marching 복원', 55);
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -357,13 +396,14 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
-      sendProgress(id, 85, '센서 그레인 복원 및 미리보기 렌더링 중...');
+      sendDetailedProgress(id, 3, 4, '센서 노이즈 그레인 감쇄 보정', 85);
+      sendDetailedProgress(id, 4, 4, '1:1 복원 캔버스 렌더링 및 인코딩', 60);
       const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
         encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
       ]);
 
-      sendProgress(id, 100, '적용 완료');
+      sendDetailedProgress(id, 4, 4, '복원 완료', 100);
       self.postMessage({
         id,
         ok: true,
@@ -394,12 +434,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 20, '1:1 원본 해상도 렌더링 준비 중...');
+      sendDetailedProgress(id, 1, 4, '1:1 원본 해상도 렌더링 준비', 20);
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 45, '1:1 버퍼 생성 및 먼지 제거 적용 중...');
+      sendDetailedProgress(id, 2, 4, '1:1 버퍼 생성 & 먼지 제거 복원', 50);
       const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult } =
         inpaint16BitAndCameraRgbLocal(
           session.origRgb8,
@@ -418,7 +458,7 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedRgb8 = healedRgb8;
       session.healedLinear16 = healedLinear16;
 
-      sendProgress(id, 75, '색공간 변환 및 메타데이터 주입 중...');
+      sendDetailedProgress(id, 3, 4, '16비트 색공간 변환 & ICC 프로파일 주입', 75);
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
@@ -428,7 +468,7 @@ self.onmessage = async (event: MessageEvent) => {
       const origBase = session.meta.originalFileName.replace(/\.[^/.]+$/, '');
       const downloadName = `${origBase}_cleaned.${ext}`;
 
-      sendProgress(id, 100, '내보내기 완료');
+      sendDetailedProgress(id, 4, 4, '최종 무손실 인코딩 & 내보내기 완료', 100);
 
       self.postMessage({
         id,

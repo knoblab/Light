@@ -3,6 +3,7 @@ import {
   DetectedDustSpot,
   DetectionParams,
   DetectionResult,
+  DetailedProgressInfo,
   InpaintResult,
   ManualBrushStroke,
   MultiFrameReport,
@@ -11,10 +12,12 @@ import {
 } from '../types/sensor';
 import SensorWorker from '../workers/sensorWorker?worker';
 
+export type ProgressCallback = (percent: number, label?: string, progressInfo?: DetailedProgressInfo) => void;
+
 interface PendingRequest {
   resolve: (data: any) => void;
   reject: (err: Error) => void;
-  onProgress?: (percent: number, label?: string) => void;
+  onProgress?: ProgressCallback;
 }
 
 class LocalSensorEngineClient {
@@ -26,12 +29,12 @@ class LocalSensorEngineClient {
     if (!this.worker) {
       this.worker = new SensorWorker();
       this.worker.onmessage = (e: MessageEvent) => {
-        const { id, type, percent, label, ok, data, error } = e.data || {};
+        const { id, type, percent, label, progressInfo, ok, data, error } = e.data || {};
         const entry = this.pending.get(id);
         if (!entry) return;
 
         if (type === 'progress') {
-          entry.onProgress?.(percent, label);
+          entry.onProgress?.(percent, label, progressInfo);
           return;
         }
 
@@ -56,7 +59,7 @@ class LocalSensorEngineClient {
     action: string,
     payload: any,
     transfer: Transferable[] = [],
-    onProgress?: (percent: number, label?: string) => void
+    onProgress?: ProgressCallback
   ): Promise<T> {
     const worker = this.getWorker();
     const id = ++this.reqCounter;

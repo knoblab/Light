@@ -36,8 +36,9 @@ import tifffile
 import piexif
 
 RAW_EXTENSIONS = {
-    '.rw2', '.dng', '.cr2', '.cr3', '.nef', '.arw',
-    '.orf', '.pef', '.raf', '.srw', '.erf', '.kdc', '.dcr'
+    '.rw2', '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw',
+    '.orf', '.pef', '.raf', '.srw', '.3fr', '.iiq', '.rwl',
+    '.erf', '.kdc', '.dcr', '.mos', '.mrw', '.fff'
 }
 
 

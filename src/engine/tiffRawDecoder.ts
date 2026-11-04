@@ -18,8 +18,9 @@ export interface DecodedImagePayload {
 }
 
 const RAW_EXT_SET = new Set([
-  'rw2', 'dng', 'cr2', 'cr3', 'nef', 'arw',
-  'orf', 'pef', 'raf', 'srw', 'erf', 'kdc', 'dcr',
+  'rw2', 'dng', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'arw',
+  'orf', 'pef', 'srw', '3fr', 'iiq', 'rwl', 'erf', 'kdc', 'dcr',
+  'mos', 'mrw', 'fff',
 ]);
 
 // Precomputed 256-entry sRGB (0..255) -> 16-bit Linear (0..65535) LUT
@@ -530,12 +531,17 @@ function parseSingleIfd(
         summary.tileByteCounts = vals;
         break;
       case 330: // SubIFDs
-        summary.subIfdOffsets = vals;
+      case 0x7010: // Sony SR2SubIFD
+        if (!summary.subIfdOffsets) {
+          summary.subIfdOffsets = vals;
+        } else {
+          summary.subIfdOffsets.push(...vals);
+        }
         break;
-      case 513: // JPEGInterchangeFormat
+      case 513: // JPEGInterchangeFormat (0x0201)
         summary.jpegOffset = vals[0];
         break;
-      case 514: // JPEGInterchangeFormatLength
+      case 514: // JPEGInterchangeFormatLength (0x0202)
         summary.jpegLength = vals[0];
         break;
       case 34665: // ExifIFD
@@ -713,10 +719,10 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
 
   const len = bytes.length;
   for (let i = 0; i < len - 16; i++) {
-    // Look for JPEG SOI + APP0/APP1/APP2/DQT/SOF marker: FF D8 FF (E0..EF or DB or C0..C4)
+    // Look for JPEG SOI + APP0/APP1/APP2/DQT/SOF marker: FF D8 FF (E0..EF or DB or C0..C4 or FE)
     if (bytes[i] === 0xff && bytes[i + 1] === 0xd8 && bytes[i + 2] === 0xff) {
       const m = bytes[i + 3];
-      if ((m >= 0xe0 && m <= 0xef) || m === 0xdb || m === 0xc0 || m === 0xc2 || m === 0xc4) {
+      if ((m >= 0xe0 && m <= 0xef) || m === 0xdb || (m >= 0xc0 && m <= 0xc4) || m === 0xfe) {
         let pos = i + 2;
         let foundWidth = 0;
         let foundHeight = 0;
@@ -741,7 +747,7 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
           const segLen = (bytes[pos] << 8) | bytes[pos + 1];
           if (segLen < 2 || pos + segLen > len) break;
 
-          if ((marker === 0xc0 || marker === 0xc1 || marker === 0xc2) && pos + 7 <= len) {
+          if ((marker === 0xc0 || marker === 0xc1 || marker === 0xc2 || marker === 0xc3) && pos + 7 <= len) {
             foundHeight = (bytes[pos + 3] << 8) | bytes[pos + 4];
             foundWidth = (bytes[pos + 5] << 8) | bytes[pos + 6];
           }
@@ -750,21 +756,34 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
             // Start of Scan (SOS) — entropy coded data follows until FF D9
             pos += segLen;
             while (pos < len - 1) {
-              if (bytes[pos] === 0xff && bytes[pos + 1] === 0xd9) {
-                pos += 2;
-                const candidateLen = pos - i;
-                const candidatePixels = foundWidth * foundHeight;
-                if (
-                  candidateLen > 8192 &&
-                  (candidatePixels > bestPixels ||
-                    (candidatePixels === bestPixels && candidateLen > bestLen))
-                ) {
-                  bestPixels = candidatePixels;
-                  bestLen = candidateLen;
-                  bestStart = i;
-                  bestEnd = pos;
+              if (bytes[pos] === 0xff) {
+                const nextM = bytes[pos + 1];
+                if (nextM === 0xd9) {
+                  pos += 2;
+                  const candidateLen = pos - i;
+                  if (foundWidth === 0 || foundHeight === 0) {
+                    const dims = getJpegDimensionsFromBytes(bytes.subarray(i, pos));
+                    if (dims) {
+                      foundWidth = dims.width;
+                      foundHeight = dims.height;
+                    }
+                  }
+                  const candidatePixels = foundWidth * foundHeight;
+                  if (
+                    candidateLen > 8192 &&
+                    (candidatePixels > bestPixels ||
+                      (candidatePixels === bestPixels && candidateLen > bestLen))
+                  ) {
+                    bestPixels = candidatePixels;
+                    bestLen = candidateLen;
+                    bestStart = i;
+                    bestEnd = pos;
+                  }
+                  break;
+                } else if (nextM === 0x00 || (nextM >= 0xd0 && nextM <= 0xd7)) {
+                  pos += 2;
+                  continue;
                 }
-                break;
               }
               pos++;
             }
@@ -781,6 +800,196 @@ function findLargestEmbeddedJpeg(bytes: Uint8Array): Uint8Array | null {
     return bytes.subarray(bestStart, bestEnd);
   }
   return null;
+}
+
+/**
+ * Detects if a buffer contains Canon CR3 (ISO Base Media File Format with 'ftypcrx ').
+ */
+export function isCanonCr3(bytes: Uint8Array): boolean {
+  if (bytes.length < 16) return false;
+  return (
+    bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70 && // 'ftyp'
+    bytes[8] === 0x63 && bytes[9] === 0x72 && bytes[10] === 0x78 && bytes[11] === 0x20   // 'crx '
+  );
+}
+
+/**
+ * Dedicated Canon CR3 ISOBMFF Container Parser.
+ * Traverses boxes ('moov', 'trak', 'uuid', 'PRVW', 'prvw', 'thmb', 'CMT1'..'CMT4')
+ * to extract embedded preview JPEGs and full Canon TIFF/EXIF metadata.
+ */
+export function parseCr3Container(
+  buffer: ArrayBuffer,
+  bytes: Uint8Array,
+  exif: ExifMetadata
+): { previewJpeg?: Uint8Array; sensorWidth?: number; sensorHeight?: number } {
+  if (!exif.make || exif.make === 'Unknown' || exif.make === 'Camera') {
+    exif.make = 'Canon';
+  }
+  if (!exif.model || exif.model === 'Camera Sensor' || exif.model.endsWith('Sensor')) {
+    exif.model = 'Canon EOS';
+  }
+
+  const view = new DataView(buffer);
+  let bestJpeg: Uint8Array | undefined;
+  let bestPixels = 0;
+  let sensorWidth = 0;
+  let sensorHeight = 0;
+
+  function scanBoxes(startOffset: number, endOffset: number, depth: number) {
+    if (depth > 8) return;
+    let pos = startOffset;
+    while (pos + 8 <= endOffset) {
+      let boxSize = view.getUint32(pos, false);
+      const boxType = String.fromCharCode(
+        bytes[pos + 4],
+        bytes[pos + 5],
+        bytes[pos + 6],
+        bytes[pos + 7]
+      );
+
+      let headerSize = 8;
+      if (boxSize === 1 && pos + 16 <= endOffset) {
+        const hi = view.getUint32(pos + 8, false);
+        const lo = view.getUint32(pos + 12, false);
+        boxSize = hi * 4294967296 + lo;
+        headerSize = 16;
+      } else if (boxSize === 0) {
+        boxSize = endOffset - pos;
+      }
+
+      if (boxSize < headerSize || pos + boxSize > endOffset) break;
+
+      const payloadStart = pos + headerSize;
+      const payloadEnd = pos + boxSize;
+
+      if (
+        boxType === 'moov' ||
+        boxType === 'trak' ||
+        boxType === 'mdia' ||
+        boxType === 'minf' ||
+        boxType === 'stbl'
+      ) {
+        scanBoxes(payloadStart, payloadEnd, depth + 1);
+      } else if (boxType === 'uuid') {
+        if (payloadEnd - payloadStart > 16) {
+          scanBoxes(payloadStart + 16, payloadEnd, depth + 1);
+        }
+      } else if (boxType === 'PRVW' || boxType === 'prvw') {
+        let jpegStart = -1;
+        for (let j = payloadStart; j < Math.min(payloadStart + 48, payloadEnd - 4); j++) {
+          if (bytes[j] === 0xff && bytes[j + 1] === 0xd8 && bytes[j + 2] === 0xff) {
+            jpegStart = j;
+            break;
+          }
+        }
+        if (jpegStart >= 0) {
+          const cand = bytes.subarray(jpegStart, payloadEnd);
+          const dims = getJpegDimensionsFromBytes(cand);
+          const px = dims ? dims.width * dims.height : 0;
+          if (px > bestPixels) {
+            bestPixels = px;
+            bestJpeg = cand;
+            if (dims) {
+              sensorWidth = Math.max(sensorWidth, dims.width);
+              sensorHeight = Math.max(sensorHeight, dims.height);
+            }
+          }
+        }
+      } else if (
+        boxType === 'CMT1' ||
+        boxType === 'CMT2' ||
+        boxType === 'CMT3' ||
+        boxType === 'CMT4'
+      ) {
+        const tiffBuf = bytes.subarray(payloadStart, payloadEnd);
+        parseTiffExifBlock(tiffBuf, exif);
+      }
+
+      pos += boxSize;
+    }
+  }
+
+  scanBoxes(0, bytes.length, 0);
+
+  return { previewJpeg: bestJpeg, sensorWidth, sensorHeight };
+}
+
+/**
+ * Detects if a buffer is a Fujifilm RAF container ("FUJIFILMCCD-RAW ").
+ */
+export function isFujifilmRaf(bytes: Uint8Array): boolean {
+  if (bytes.length < 16) return false;
+  return (
+    bytes[0] === 0x46 && bytes[1] === 0x55 && bytes[2] === 0x4a && bytes[3] === 0x49 && // "FUJI"
+    bytes[4] === 0x46 && bytes[5] === 0x49 && bytes[6] === 0x4c && bytes[7] === 0x4d && // "FILM"
+    bytes[8] === 0x43 && bytes[9] === 0x43 && bytes[10] === 0x44 && bytes[11] === 0x2d && // "CCD-"
+    bytes[12] === 0x52 && bytes[13] === 0x41 && bytes[14] === 0x57 && bytes[15] === 0x20   // "RAW "
+  );
+}
+
+/**
+ * Dedicated Fujifilm RAF Container Parser.
+ * Extracts camera model, embedded full-resolution preview JPEG, and EXIF metadata.
+ */
+export function parseFujifilmRaf(
+  buffer: ArrayBuffer,
+  bytes: Uint8Array,
+  exif: ExifMetadata
+): { previewJpeg?: Uint8Array; sensorWidth?: number; sensorHeight?: number } {
+  exif.make = 'FUJIFILM';
+  const view = new DataView(buffer);
+  let sensorWidth = 0;
+  let sensorHeight = 0;
+  let previewJpeg: Uint8Array | undefined;
+
+  // Camera model name at offset 28..59 (null-terminated ASCII)
+  if (bytes.length >= 60) {
+    let model = '';
+    for (let i = 28; i < 60; i++) {
+      const ch = bytes[i];
+      if (ch === 0) break;
+      if (ch >= 32 && ch <= 126) model += String.fromCharCode(ch);
+    }
+    model = model.trim();
+    if (model) {
+      exif.model = model.startsWith('FUJIFILM') ? model : `FUJIFILM ${model}`;
+    }
+  }
+
+  // Offset 84: JPEG preview offset (Big Endian UInt32)
+  // Offset 88: JPEG preview length (Big Endian UInt32)
+  if (bytes.length >= 92) {
+    const jpgOffset = view.getUint32(84, false);
+    const jpgLength = view.getUint32(88, false);
+    if (
+      jpgOffset > 0 &&
+      jpgLength > 4096 &&
+      jpgOffset + jpgLength <= bytes.length &&
+      bytes[jpgOffset] === 0xff &&
+      bytes[jpgOffset + 1] === 0xd8
+    ) {
+      previewJpeg = bytes.subarray(jpgOffset, jpgOffset + jpgLength);
+      const dims = getJpegDimensionsFromBytes(previewJpeg);
+      if (dims) {
+        sensorWidth = dims.width;
+        sensorHeight = dims.height;
+      }
+    }
+  }
+
+  // Scan for Fuji EXIF TIFF header in early offsets
+  for (let o = 60; o < Math.min(4096, bytes.length - 16); o += 2) {
+    if (
+      (bytes[o] === 0x49 && bytes[o + 1] === 0x49 && bytes[o + 2] === 0x2a && bytes[o + 3] === 0x00) ||
+      (bytes[o] === 0x4d && bytes[o + 1] === 0x4d && bytes[o + 2] === 0x00 && bytes[o + 3] === 0x2a)
+    ) {
+      parseTiffExifBlock(bytes.subarray(o), exif);
+      break;
+    }
+  }
+
+  return { previewJpeg, sensorWidth, sensorHeight };
 }
 
 /**
@@ -1231,11 +1440,58 @@ export async function decodeImageFileLocal(
     }
   };
 
-  // Parse TIFF / RW2 / DNG / RAW IFD tree if header is II/MM (magic 42 standard TIFF, 85 Panasonic RW2, 0x4F52 Olympus ORF)
-  if (littleEndian !== null && (magic === 42 || magic === 85 || magic === 0x4f52 || magic === 0x5352)) {
+  // Check for Canon CR3 ISOBMFF container ('ftypcrx ')
+  if (isCanonCr3(bytes)) {
+    const cr3Res = parseCr3Container(buffer, bytes, exif);
+    if (cr3Res.previewJpeg) {
+      considerCandidateJpeg(cr3Res.previewJpeg);
+    }
+    if (cr3Res.sensorWidth && cr3Res.sensorHeight) {
+      if (cr3Res.sensorWidth * cr3Res.sensorHeight > maxSensorWidth * maxSensorHeight) {
+        maxSensorWidth = cr3Res.sensorWidth;
+        maxSensorHeight = cr3Res.sensorHeight;
+      }
+    }
+  }
+
+  // Check for Fujifilm RAF container ('FUJIFILMCCD-RAW ')
+  if (isFujifilmRaf(bytes)) {
+    const rafRes = parseFujifilmRaf(buffer, bytes, exif);
+    if (rafRes.previewJpeg) {
+      considerCandidateJpeg(rafRes.previewJpeg);
+    }
+    if (rafRes.sensorWidth && rafRes.sensorHeight) {
+      if (rafRes.sensorWidth * rafRes.sensorHeight > maxSensorWidth * maxSensorHeight) {
+        maxSensorWidth = rafRes.sensorWidth;
+        maxSensorHeight = rafRes.sensorHeight;
+      }
+    }
+  }
+
+  // Parse TIFF / RW2 / DNG / NEF / NRW / ARW / CR2 / ORF / PEF / SRW / 3FR / IIQ IFD tree
+  if (
+    littleEndian !== null &&
+    (magic === 42 ||
+      magic === 85 ||
+      magic === 0x4f52 ||
+      magic === 0x524f ||
+      magic === 0x5352 ||
+      magic === 0x5253)
+  ) {
     const firstIfdOffset = view.getUint32(4, littleEndian);
     const visitedOffsets = new Set<number>();
     const queue: number[] = [firstIfdOffset];
+
+    // Check for Canon CR2 secondary header at offset 16
+    if (
+      (ext === 'cr2' || (bytes.length >= 16 && bytes[8] === 0x43 && bytes[9] === 0x52)) &&
+      buffer.byteLength >= 24
+    ) {
+      const cr2RawIfd = view.getUint32(20, littleEndian);
+      if (cr2RawIfd > 0 && cr2RawIfd < buffer.byteLength) {
+        queue.push(cr2RawIfd);
+      }
+    }
 
     while (queue.length > 0) {
       const curOffset = queue.shift()!;

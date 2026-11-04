@@ -1,99 +1,127 @@
-# SensorClean — 다크룸 UI/UX 정교화 및 직관적 버튼 재배치 계획
+# 전 세계 매이저 카메라 RAW 포맷 풀 지원 및 브라우저 전용 초고속 디코더 고도화 계획
 
-흩어져 있던 워크플로우 실행 버튼과 캔버스 조작 도구를 작업 흐름에 맞게 통합하고, 번호가 붙은 기계적 버튼 라벨과 중첩 카드·배지 등 인위적인 AI 생성물 느낌(AI Slop)을 제거하여 전문 사진 현상 소프트웨어 수준의 다크룸 인터페이스로 개편합니다.
+Canon(.CR2, .CR3), Nikon(.NEF, .NRW), Sony(.ARW), Fujifilm(.RAF), Olympus(.ORF), Pentax(.PEF), Samsung(.SRW), Hasselblad(.3FR), PhaseOne(.IIQ), Leica(.RWL), Panasonic(.RW2), Adobe(.DNG) 등 전 세계 주요 카메라 RAW 파일 포맷을 브라우저 로컬 Web Worker에서 서버 전송 없이 100% 로컬로 직접 디코딩하고, 카메라 제조사별 고유 컨테이너(ISOBMFF, RAF Header, TIFF SubIFD/MakerNote)로부터 원본 센서 해상도와 정밀 EXIF를 완벽히 추출합니다.
 
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> 질의응답을 통해 확정된 핵심 설계 방향입니다.
+> 사용자 질의응답을 통해 확정된 제품 및 아키텍처 결정 사항입니다.
 
-- **핵심 실행 버튼 통합 (확정)**: 상단 바 좌우와 아코디언 헤더에 중복·분산되어 있던 `먼지 분석`과 `복원 적용` 버튼을 **우측 인스펙터 패널 최상단 액션 영역**에 나란히 통합 배치합니다. 상단 바에는 파일 입출력(`사진 열기`, `내보내기`)과 모드 전환만 남겨 시선 분산을 없앱니다.
-- **캔버스 브러시 및 뷰어 도구 통합 (확정)**: 우측 끝단에 고립되어 있던 툴 레일을 제거하고, **캔버스 하단 통합 HUD 독(Dock)**에 브러시·선택 도구(선택, 스팟 해제 브러시, 수동 복원 브러시, 마스크 지우개 + 반경 슬라이더)와 뷰어 비교 컨트롤(작업본/복원본, 분할, 원본, 엣지, 오버레이, 줌)을 한눈에 조작할 수 있도록 통합합니다.
-- **엄격한 컬러 시스템 및 Anti-Slop 정교화 (확정)**: 현행 하이라이트 액센트(`#556042`)는 유지하고, 모든 배경·표면·경계선·타이포그래피를 지정된 그레이스케일 팔레트(`#F7F6F2`, `#2B2B2E`, `#E7E6E1`, `#C2C1BB`, `#888783`, `#535356`, `#3A3A3D`)로 일원화합니다. 또한 `1. 불러오기`, `2. 먼지 분석` 같은 인위적인 번호 라벨과 중첩된 박스형 EXIF·색공간 카드를 걷어내고 절제된 헤어라인 리스트로 재구성합니다.
+- **지원 포맷 범위 (확정)**: 요청하신 6종 포맷(.NEF, .NRW, .RAF, .CR3, .CR2, .ARW)을 포함하여 Olympus(.ORF), Pentax(.PEF), Samsung(.SRW), Hasselblad(.3FR), PhaseOne(.IIQ), Leica(.RWL), Panasonic(.RW2), Adobe(.DNG) 등 글로벌 주요 제조사의 모든 RAW 포맷을 포괄적으로 지원합니다.
+- **디코딩 아키텍처 (확정)**: 대용량 RAW 파일(50MB~150MB+)을 서버로 전송하지 않고 브라우저 로컬(Web Worker + OffscreenCanvas)에서 직접 바이트 수준으로 컨테이너를 파싱하여 수백 밀리초 이내에 16비트 선형 배열 및 고해상도 작업 버퍼로 로드합니다.
+- **메타데이터 & 센서 규격 보존 (확정)**: Canon ISOBMFF box 파서, Fuji RAF 헤더 파서, Nikon/Sony/Olympus TIFF SubIFD 파서를 통해 카메라 제조사 고유 태그, 렌즈 정보, 셔터/조리개/ISO/화각, 그리고 센서의 유효 해상도(Effective Sensor Resolution)를 완벽하게 추출하고 내보내기 시 보존합니다.
 
 ---
 
 ## 1. Overview & Core Concept
 
-- **What It Does**: 카메라 센서 먼지 탐지 및 16비트 무손실 복원 워크스페이스의 조작 동선을 단일화하고 시각적 노이즈를 제거합니다.
-- **Target Audience / Persona**: RAW/TIFF 원본 화질 손실 없이 센서 먼지를 신속하게 검수·복원하려는 사진가 및 리터칭 전문가.
-- **Key Value**: 좌우 끝으로 눈과 마우스를 오가야 했던 비직관적 동선을 해결하고, 캔버스는 중앙/하단에서, 파라미터와 실행은 우측 패널 상단에서 일관되게 제어할 수 있습니다.
+- **What It Does**: 현존하는 거의 모든 상용 카메라 브랜드(Canon, Nikon, Sony, Fujifilm, Panasonic, Olympus, Pentax, Leica, Hasselblad, PhaseOne)의 RAW 포맷을 드래그앤드롭만으로 즉시 열람하고, 16비트 선형 센서 물리 기반으로 먼지를 탐지·복원합니다.
+- **Target Audience**: 다양한 바디(예: 소니 A7/A1, 니콘 Z/D시리즈, 캐논 R/EOS시리즈, 후지 X/GFX시리즈 등)를 사용하는 상업 사진가, 천체/풍경 사진가, 스튜디오 리터쳐.
+- **Key Value**: 별도의 외부 변환기(DNG Converter 등)를 거칠 필요 없이 원본 RAW 파일을 브라우저에 바로 던져 넣어 작업할 수 있으며, 네트워크 대역폭 소모 없이 안전하게 개인 사진을 다룰 수 있습니다.
 
 ---
 
-## 2. User Experience & Visual Design
+## 2. Supported Camera RAW Formats & Container Specifications
 
-### Key User Flows
-1. **파일 입출력 (상단 바)**: 좌측에서 단일/연속 모드를 선택하고 `사진 열기`로 원본을 불러옵니다. 중앙에는 파일명과 핵심 촬영 정보가 캡슐 배지 없이 깔끔한 텍스트(`·` 구분자)로 표시되며, 우측 끝에서 `내보내기`를 실행합니다.
-2. **탐지 및 복원 실행 (우측 인스펙터 상단 고정 바)**: 우측 패널 최상단에 위치한 Primary Action Bar에서 **[먼지 분석]** → **[복원 적용]** (연속 모드 시 **[전체 일괄 적용]** 포함) 및 **[복원 되돌리기]**를 한곳에서 순서대로 실행합니다.
-3. **캔버스 직접 조작 및 비교 (캔버스 하단 통합 HUD)**: 사진 바로 아래 플로팅 HUD 좌측에서 4가지 브러시/선택 도구를 전환하고(브러시 선택 시 반경 슬라이더가 즉시 옆에 표시됨), 중앙에서 뷰 모드(복원본·분할·원본·엣지·오버레이)를 전환하며, 우측에서 줌과 실행 취소/다시 실행을 제어합니다.
-
-### Visual Identity & Theme
-- **Aesthetic Direction**: Capture One 및 전문 다크룸 소프트웨어 스타일의 절제되고 밀도 높은 유틸리타리언 인터페이스.
-- **Color Palette & Mood**:
-  - **Base Black (`#2B2B2E`)**: 메인 캔버스 배경 및 기본 앱 바탕 표면
-  - **Grey 11 (`#3A3A3D`)**: 상단 헤더, 우측 인스펙터 패널, 하단 플로팅 HUD 표면
-  - **Grey 9 (`#535356`)**: 모든 1px 구조적 구분선(Hairline Divider) 및 슬라이더 트랙
-  - **Grey 7 (`#888783`)**: 보조 라벨, 비활성 아이콘, 단위 표기
-  - **Grey 3 (`#C2C1BB`)**: 기본 컨트롤 라벨 및 세컨더리 텍스트
-  - **Grey 1 (`#E7E6E1`)**: 주요 본문 텍스트 및 수치 데이터
-  - **Base White (`#F7F6F2`)**: 활성 포커스 텍스트 및 강조 타이틀
-  - **Highlight Accent (`#556042`)**: 주요 실행 버튼(`먼지 분석`, `복원 적용`) 및 활성 도구/탭 상태 표시
-- **Typography & Hierarchy**:
-  - 모든 수치(반경, 감도, 해상도, 스팟 좌표/크기, 진행률)에 `tabular-nums`를 적용하여 슬라이더 조작 시 레이아웃 흔들림 방지.
-  - 번호가 붙은 튜토리얼식 문구(`1. 불러오기`, `2. 먼지 분석`, `3. 적용`, `4. 내보내기`)를 직관적인 전문 용어(`사진 열기`, `먼지 분석`, `복원 적용`, `내보내기`)로 교체.
-- **Anti-Slop Component Styling**:
-  - **Zero-Pill Metadata**: 상단 바의 색공간 배지 박스를 제거하고 `Sony ILCE-7RM5 · 8192×5464 · f/8 · 1/250s · ISO 100 · Adobe RGB` 형태의 정돈된 인라인 텍스트로 표현.
-  - **No Cards Within Cards**: 우측 패널 내부의 2×2 박스형 EXIF 카드와 라디오 점(Dot)이 박힌 두꺼운 색공간 카드들을 제거하고, 1px 헤어라인과 여백만 사용하는 간결한 키-벨류 테이블 및 컴팩트 세그먼트/드롭다운으로 정리.
+| 카메라 제조사 | 확장자 | 컨테이너 구조 및 전용 파서 전략 |
+| :--- | :--- | :--- |
+| **Canon** | `.CR3` | **ISOBMFF (QuickTime/MP4 box)**: `ftypcrx `, `moov`/`trak`/`mdat`, `prvw`(Preview JPEG), `thmb` 박스를 파싱하여 최고해상도 원본 임베디드 스트림 및 EXIF 메타데이터 바이트 추출 |
+| **Canon** | `.CR2` | **TIFF 확장 헤더 (`II\x2a\x00\x10\x00\x00\x00`)**: IFD0(미리보기), IFD1(썸네일), IFD2/3(슬라이스 RAW), Exif IFD 및 Canon MakerNote 태그 파싱 |
+| **Nikon** | `.NEF`, `.NRW` | **TIFF 베이스 (`II\x2a\x00`)**: IFD0 SubIFD0/1, Exif MakerNote, JpgFromRaw(전체 해상도 JPEG) 오프셋 및 센서 풀사이즈 추출 |
+| **Fujifilm** | `.RAF` | **Fujifilm CCD-RAW 헤더 (`FUJIFILMCCD-RAW `)**: 오프셋 84~104의 내장 JPEG 오프셋/길이 파싱 및 Fuji EXIF IFD 파서 구동 |
+| **Sony** | `.ARW` | **TIFF 베이스 (`II\x2a\x00`)**: IFD0, SubIFD, SR2SubIFD(Tag 0x7010), 내장 최고 해상도 프리뷰 및 카메라 센서 치수 파싱 |
+| **Olympus / OM** | `.ORF` | **Olympus 헤더 (`II\x52\x4f` 0x4F52, `II\x53\x52` 0x5253)**: 매직 바이트 검증 및 IFD 트리 탐색 |
+| **Panasonic** | `.RW2`, `.RAW` | **Panasonic 헤더 (`II\x55\x00`)**: Tag 0x002E(JpgFromRaw), SensorWidth(0x0002), SensorHeight(0x0003) 파싱 |
+| **Pentax** | `.PEF` | **TIFF 베이스 (`II\x2a\x00`)**: Pentax MakerNote 및 내장 풀사이즈 스트림 추출 |
+| **Samsung** | `.SRW` | **TIFF 베이스**: 삼성 NX 시리즈 고유 IFD 구조 및 프리뷰 추출 |
+| **Hasselblad** | `.3FR`, `.FFF` | **Hasselblad TIFF**: 중형 디지털 백 센서 메타데이터 및 프리뷰 파싱 |
+| **PhaseOne** | `.IIQ` | **PhaseOne TIFF**: IQ 시리즈 중형 센서 치수 및 프리뷰 추출 |
+| **Leica** | `.RWL`, `.DNG` | **TIFF / DNG 규격**: 라이카 M/SL/Q 시리즈 DNG/RWL 완벽 호환 |
+| **Adobe 표준** | `.DNG` | **Adobe Digital Negative**: 16비트 선형 TIFF 스트립, SubIFD, DefaultCropSize 파싱 |
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 3. Technical Architecture & Implementation Details
 
-- **Decision 1: 우측 패널 최상단에 워크플로우 실행 바(Action Header) 고정**
-  - *Chosen Approach*: 우측 인스펙터 스크롤 영역 상단에 고정된 액션 헤더를 두고 `먼지 분석`과 `복원 적용`(필요 시 `초기화/되돌리기`) 버튼을 나란히 배치합니다.
-  - *Why*: 사용자가 우측 패널에서 감도나 복원 반경 슬라이더를 조절한 직후 마우스를 멀리 이동하지 않고 바로 위에서 분석과 복원을 실행할 수 있어 조작 피로도가 크게 줄어듭니다.
-  - *Alternatives Considered*: 상단 헤더에 모든 버튼을 나열하는 방식은 파라미터 조절 패널과 실행 버튼 사이의 거리가 멀어 동선이 분리됩니다.
-
-- **Decision 2: 우측 끝 툴 레일 제거 및 하단 캔버스 HUD로 도구 통합**
-  - *Chosen Approach*: 화면 맨 오른쪽 끝에 붙어 있던 좁은 세로 툴 레일을 없애고, 캔버스 하단 HUD에 브러시 도구와 인라인 브러시 크기 슬라이더, Undo/Redo, 뷰 비교 모드를 그룹화합니다.
-  - *Why*: 캔버스 위에서 스팟을 클릭하거나 브러시질을 할 때 시선이 캔버스 내부에 머물며, 브러시 선택 시 우측 패널이 밀려나며 생기는 레이아웃 점프(Layout Shift)도 완전히 사라집니다.
-
----
-
-## 4. Technical Architecture & Data Strategy
-
-### Architecture & Component Layout Diagram
+### Parser Architecture Diagram
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ Top Bar (#3A3A3D, border #535356)                                                │
-│ [SensorClean] [단일|연속] [사진 열기]       파일명 · 카메라 · 해상도 · 색역       [내보내기 ▾] [패널 토글] │
-├─────────────────────────────────────────────────────────┬────────────────────────┤
-│                                                         │ Right Inspector (#3A3A3D)│
-│                                                         │ ┌────────────────────┐ │
-│                                                         │ │ Sticky Action Bar  │ │
-│                                                         │ │ [먼지 분석] [복원 적용] │ │
-│                   Darkroom Canvas                       │ └────────────────────┘ │
-│               (Base Black #2B2B2E)                      │ ▾ 먼지 탐지 파라미터      │
-│                                                         │   [듀얼 | 미세 | 보케]   │
-│                                                         │   감도 / 구름보호 / 반경  │
-│                                                         │ ▾ 복원 및 색공간 설정     │
-│                                                         │   복원 반경 / 입자 유지   │
-│                                                         │   출력 색공간 선택        │
-│   ┌─────────────────────────────────────────────────┐   │ ▾ 검출 스팟 목록 (N/M)   │
-│   │ Bottom Unified HUD (#3A3A3D/95, border #535356) │   │   전체선택 · 해제         │
-│   │ [선택|해제브러시|복원브러시|지우개] [반경] │ [작업본|분할|원본|엣지] │ [줌] │   │ ▾ 카메라 정보 (EXIF)    │
-│   └─────────────────────────────────────────────────┘   │   컴팩트 키-벨류 리스트   │
-└─────────────────────────────────────────────────────────┴────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                      User Drop / File Open Event                       │
+│    (.NEF, .NRW, .RAF, .CR3, .CR2, .ARW, .ORF, .PEF, .SRW, .3FR, etc.)   │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ ArrayBuffer
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Web Worker: decodeImageFileLocal (src/engine/tiffRawDecoder.ts)        │
+│                                                                        │
+│ 1. Header & Signature Sniffing:                                        │
+│    ├─ ISOBMFF ('ftypcrx ' at +4): Canon CR3 Parser                     │
+│    │  └─ traverseBoxes() -> extract 'prvw' box / JPEG stream & EXIF    │
+│    ├─ Magic 'FUJIFILMCCD-RAW': Fujifilm RAF Parser                     │
+│    │  └─ read offset at +84/+88 -> extract embedded preview & EXIF     │
+│    ├─ Magic 0x4F52 ('RO') / 0x5253 ('SR'): Olympus ORF Parser          │
+│    ├─ Magic 0x0055 (85): Panasonic RW2 Parser                          │
+│    └─ Magic 0x002A (42): Standard TIFF (NEF, NRW, ARW, CR2, PEF, DNG)  │
+│                                                                        │
+│ 2. Deep IFD & MakerNote Traversal:                                     │
+│    ├─ SubIFDs (Tag 330), Exif IFD (Tag 34665), MakerNote (Tag 37500)   │
+│    ├─ Highest Resolution Preview Detection (SOF0/SOF1/SOF2 dimensions) │
+│    └─ Native Sensor Dimensions (ImageWidth, ExifImageWidth, DNG crop)  │
+│                                                                        │
+│ 3. Color Space & 16-bit Linear Buffer Synthesis:                       │
+│    ├─ Embedded ICC Profile (APP2 / Tag 34675) extraction & recognition │
+│    └─ Perceptual 8-bit to 16-bit Linear LUT mapping (0..65535)         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │ DecodedImagePayload
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ Main Thread & UI Engine                                                │
+│ ├─ Session Metadata: Brand, Model, Lens, Shutter, Aperture, ISO, Sensor │
+│ ├─ DarkroomCanvas: Native resolution rendering & 16-bit Dust Inspection│
+│ └─ Export Pipeline: DNG 16-bit Linear / TIFF 16-bit / PNG / JPEG       │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Interactive Component & State Mapping
-- **Top Header Bar**:
-  - `studioMode` 토글 (`단일` / `연속`), 파일 업로드 트리거(`사진 열기`), 인라인 메타데이터 표시, `내보내기` 포맷 드롭다운(DNG, 16-bit TIFF, PNG, JPG 및 연속 ZIP), 우측 인스펙터 접기/펴기 토글.
-- **Right Inspector Sticky Action Bar**:
-  - `먼지 분석` (`handleRedetect`), `복원 적용` (`handleApplyInpainting`), 연속 모드일 때 `전체 일괄 적용` (`handleApplyBatchInpainting`), 복원 결과가 있을 때 `되돌리기` (`handleRevertInpainting`)를 상태에 맞게 활성화.
-- **Bottom Unified Canvas HUD**:
-  - **좌측 섹션 (도구 & 히스토리)**: `inspect`(선택), `deselect-brush`(영역 해제), `brush-add`(수동 복원), `brush-erase`(마스크 지우개) 전환 버튼 + 브러시 도구 활성 시 인라인 반경 슬라이더(`4px~120px`) + `Undo` / `Redo` 버튼.
-  - **중앙 섹션 (뷰어 & 오버레이)**: 오버레이 눈 아이콘 토글(`O`), 스팟 번호 토글(`#`), 뷰 비교 세그먼트(`작업본/복원본`, `분할`, `원본`, `엣지`), 연속 모드 필터(`전체`/`연속확정`).
-  - **우측 섹션 (줌)**: 축소, 줌 비율 표시(`tabular-nums`), 확대, 화면 맞춤(`100%`).
+### Key Technical Implementations
+
+1. **`src/engine/tiffRawDecoder.ts` 확장**:
+   - `RAW_EXT_SET`에 `nef`, `nrw`, `raf`, `cr3`, `cr2`, `arw`, `orf`, `pef`, `srw`, `3fr`, `iiq`, `rwl`, `mos`, `mrw` 추가.
+   - **Canon CR3 ISOBMFF Parser**:
+     - 바이트 4~11에 위치한 `ftyp` 및 `crx ` 서명 검사.
+     - ISO 박스(`moov`, `uuid`, `prvw`, `thmb`) 순회 루프 구현.
+     - `prvw` 박스 내부의 고화질 풀해상도 JPEG 스트림 오프셋 및 바이트 크기 추출.
+     - `CMT1`, `CMT2`, `CMT3`, `CMT4` 박스로부터 Canon TIFF EXIF 블록 추출.
+   - **Fujifilm RAF Parser**:
+     - 시작 16바이트의 `FUJIFILMCCD-RAW ` 검사.
+     - 오프셋 84~92에서 내장 JPEG 오프셋과 길이 바이트를 빅엔디언으로 읽어 직접 추출.
+     - RAF EXIF 헤더 오프셋 탐색을 통한 렌즈 및 촬영 파라미터 파싱.
+   - **TIFF 기반 RAW (NEF, NRW, ARW, CR2, ORF, PEF) 확장**:
+     - 매직 바이트 검증 확장: `0x4F52` (Olympus ORF), `0x5253`, `0x0055` (RW2), `0x002A` (Nikon, Sony, Canon CR2, Pentax).
+     - Sony ARW의 SR2SubIFD (Tag 0x7010) 순회 및 전용 MakerNote 태그 처리.
+     - Nikon NEF의 SubIFD0/SubIFD1 및 ScanOfScan JPEG 스트림 추출.
+     - Canon CR2의 오프셋 8 이후 IFD 링크 및 스트립 테이블 처리.
+2. **UI 입력 및 파일 필터 동기화**:
+   - `src/App.tsx`:
+     - 파일 업로드 `<input type="file" accept="..." />`에 `.rw2,.dng,.cr2,.cr3,.nef,.nrw,.raf,.arw,.orf,.pef,.srw,.3fr,.iiq,.rwl,.mos,.mrw,image/*` 전체 명시.
+     - 빈 캔버스 드롭존 및 상단 헤더 툴팁에 "Canon(CR2/CR3), Nikon(NEF/NRW), Sony(ARW), Fujifilm(RAF), Panasonic(RW2), Olympus(ORF), Pentax(PEF), DNG 등 전 기종 RAW 지원" 안내 문구 반영.
+   - `python/raw_pipeline.py` & `server.ts`:
+     - 멀티 플랫폼 호환 및 서버 파이프라인(다운로드 및 일괄 처리)에서도 신규 확장자들을 정상적으로 허용하고 `rawpy`/`tifffile` 파이프라인과 일치시킵니다.
+
+---
+
+## 4. Verification & Testing Strategy
+
+- **다양한 카메라 RAW 테스트**:
+  - Canon CR3 (EOS R5/R6/R7 등 ISOBMFF 컨테이너)
+  - Canon CR2 (EOS 5D Mark IV 등 레거시 TIFF 컨테이너)
+  - Nikon NEF / NRW (Z9, Z7, D850 등 고해상도 니콘 컨테이너)
+  - Sony ARW (A7R V, A7 IV, FX3 등 소니 컨테이너)
+  - Fujifilm RAF (X-T5, X-H2, GFX100 등 후지필름 컨테이너)
+  - Olympus ORF (OM-1, E-M1 등 올림푸스 컨테이너)
+- **검증 항목**:
+  1. 파일 드래그앤드롭 즉시 로컬 Web Worker 디코딩 성공 여부
+  2. 제조사별 카메라 모델명, 렌즈명, 노출값(조리개, 셔터, ISO, 초점거리)의 정확한 추출 여부
+  3. 센서 원본 해상도(Full Sensor Dimensions)의 정확한 유지 및 16비트 복원 파이프라인 연계
+  4. 16비트 DNG / 16비트 TIFF / PNG / JPEG 무손실 내보내기 정상 동작 여부
+  5. `compile_applet` 및 `lint_applet` 통과

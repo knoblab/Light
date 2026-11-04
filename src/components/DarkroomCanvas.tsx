@@ -14,9 +14,11 @@ import {
   Redo2,
   Minus,
   Plus,
+  Check,
 } from 'lucide-react';
 import {
   DetectedDustSpot,
+  DetailedProgressInfo,
   InteractionTool,
   ManualBrushStroke,
   OverlayMode,
@@ -49,6 +51,7 @@ interface DarkroomCanvasProps {
   isProcessing: boolean;
   processingLabel: string;
   progressPercent?: number;
+  progressInfo?: DetailedProgressInfo | null;
   onUploadFile: (file: File) => void;
   onBatchDeselectSpots?: (ids: string[]) => void;
   onBeginHistoryBatch?: () => void;
@@ -84,6 +87,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
   isProcessing,
   processingLabel,
   progressPercent = 0,
+  progressInfo = null,
   onUploadFile,
   onBatchDeselectSpots,
   onBeginHistoryBatch,
@@ -510,7 +514,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
       <input
         ref={fileInputRef}
         type="file"
-        accept=".rw2,.dng,.cr2,.cr3,.nef,.arw,.orf,.pef,.raf,.tif,.tiff,.png,.jpg,.jpeg"
+        accept=".rw2,.dng,.cr2,.cr3,.nef,.nrw,.raf,.arw,.orf,.pef,.srw,.3fr,.iiq,.rwl,.mos,.mrw,.fff,.tif,.tiff,.png,.jpg,.jpeg,image/*"
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) onUploadFile(f);
@@ -532,8 +536,8 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
           <span className="text-sm font-semibold text-[#F7F6F2] mb-1">
             사진 열기
           </span>
-          <span className="text-xs text-[#888783] mb-5 tabular-nums">
-            RW2 · DNG · CR2 · NEF · ARW · TIFF · PNG · JPG
+          <span className="text-xs text-[#888783] mb-5 tabular-nums text-center max-w-sm">
+            Canon · Nikon · Sony · Fujifilm · Panasonic · Olympus · Pentax · DNG
           </span>
           <button
             type="button"
@@ -882,28 +886,126 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
         </>
       )}
 
-      {/* Processing Modal Card with Progress Bar and Percentage */}
+      {/* Detailed Processing Modal with Step Tracker */}
       {isProcessing && (
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-[2px] flex items-center justify-center z-40 px-4">
-          <div className="px-6 py-4.5 rounded-xl bg-[#3A3A3D] border border-[#535356] flex flex-col gap-3 shadow-2xl w-full max-w-sm">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 truncate">
-                <div className="w-4 h-4 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
-                <span className="text-xs font-semibold text-[#E7E6E1] leading-snug truncate">
-                  {processingLabel || '처리 중...'}
-                </span>
+        <div className="absolute inset-0 bg-black/65 backdrop-blur-[3px] flex items-center justify-center z-50 px-4 animate-in fade-in duration-200">
+          <div className="p-5 md:p-6 rounded-2xl bg-[#2B2B2E] border border-[#535356] flex flex-col gap-4 shadow-2xl w-full max-w-md text-[#E7E6E1]">
+            {/* Header: Title + Overall % */}
+            <div className="flex items-center justify-between gap-3 border-b border-[#3A3A3D] pb-3">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-5 h-5 rounded-full border-2 border-[#556042] border-t-transparent animate-spin shrink-0" />
+                <div className="truncate">
+                  <h3 className="text-xs font-bold text-[#F7F6F2] truncate tracking-tight">
+                    {processingLabel || '다크룸 센서 연산 처리 중'}
+                  </h3>
+                  <p className="text-[11px] text-[#C2C1BB] truncate mt-0.5">
+                    {progressInfo
+                      ? `${progressInfo.stepIndex}/${progressInfo.totalSteps}단계 · ${progressInfo.stepName}`
+                      : '화소 분석 및 먼지 알고리즘 실행 중...'}
+                  </p>
+                </div>
               </div>
-              <span className="text-xs font-bold text-[#E7E6E1] shrink-0 tabular-nums">
-                {Math.min(100, Math.max(0, Math.round(progressPercent)))}%
-              </span>
+              <div className="text-right shrink-0">
+                <span className="text-base font-extrabold text-[#F7F6F2] tabular-nums tracking-tight">
+                  {progressInfo?.overallPercent ?? Math.min(100, Math.max(0, Math.round(progressPercent)))}%
+                </span>
+                <span className="block text-[9px] text-[#888783] uppercase tracking-wider font-medium">전체 진행률</span>
+              </div>
             </div>
 
-            {/* Progress Bar Track */}
-            <div className="w-full bg-[#2B2B2E] h-2 rounded-full overflow-hidden border border-[#535356] p-0.5">
-              <div
-                style={{ width: `${Math.min(100, Math.max(0, progressPercent))}%` }}
-                className="bg-[#556042] h-full rounded-full transition-all duration-200 ease-out"
-              />
+            {/* 4-Step Tracker Visual Nodes */}
+            {(() => {
+              const currentStep = progressInfo?.stepIndex ?? (
+                progressPercent < 25 ? 1 : progressPercent < 50 ? 2 : progressPercent < 75 ? 3 : 4
+              );
+              const totalSteps = progressInfo?.totalSteps ?? 4;
+              const stepTitles = ['디코딩', '가우시안 차분', '블롭 연산', '복원 인코딩'];
+
+              return (
+                <div className="space-y-2 py-1">
+                  <div className="grid grid-cols-4 gap-1 relative">
+                    {/* Background connecting line */}
+                    <div className="absolute top-3 left-4 right-4 h-0.5 bg-[#3A3A3D] -z-0" />
+
+                    {Array.from({ length: totalSteps }).map((_, idx) => {
+                      const stepNum = idx + 1;
+                      const isCompleted = stepNum < currentStep;
+                      const isActive = stepNum === currentStep;
+
+                      return (
+                        <div key={stepNum} className="flex flex-col items-center gap-1.5 z-10 relative">
+                          <div
+                            className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-all duration-300 ${
+                              isCompleted
+                                ? 'bg-[#556042] text-[#F7F6F2] shadow-sm'
+                                : isActive
+                                ? 'bg-[#556042] text-[#F7F6F2] ring-4 ring-[#556042]/30 scale-110'
+                                : 'bg-[#3A3A3D] text-[#888783] border border-[#535356]'
+                            }`}
+                          >
+                            {isCompleted ? (
+                              <Check className="w-3 h-3 stroke-[3]" />
+                            ) : (
+                              <span className="tabular-nums">{stepNum}</span>
+                            )}
+                          </div>
+                          <span
+                            className={`text-[10px] text-center leading-tight truncate w-full px-0.5 ${
+                              isActive
+                                ? 'text-[#F7F6F2] font-semibold'
+                                : isCompleted
+                                ? 'text-[#C2C1BB]'
+                                : 'text-[#888783]'
+                            }`}
+                          >
+                            {stepTitles[idx] || `${stepNum}단계`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* Primary & Sub-step Progress Bars */}
+            <div className="space-y-2 bg-[#232326] p-3 rounded-xl border border-[#3A3A3D]">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-[#C2C1BB] font-medium flex items-center gap-1.5 truncate">
+                  {progressInfo ? (
+                    <>
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#556042] animate-pulse shrink-0" />
+                      <span className="truncate">{progressInfo.stepName}</span>
+                    </>
+                  ) : (
+                    <span>실시간 스레드 연산 중</span>
+                  )}
+                </span>
+                <span className="text-[#E7E6E1] font-semibold tabular-nums shrink-0 ml-2">
+                  {progressInfo ? `단계내 ${progressInfo.stepPercent}%` : `${Math.round(progressPercent)}%`}
+                </span>
+              </div>
+
+              {/* Step Sub-Progress Bar Track */}
+              <div className="w-full bg-[#3A3A3D] h-1.5 rounded-full overflow-hidden p-0.5">
+                <div
+                  style={{
+                    width: `${Math.min(
+                      100,
+                      Math.max(0, progressInfo ? progressInfo.stepPercent : progressPercent)
+                    )}%`,
+                  }}
+                  className="bg-[#556042] h-full rounded-full transition-all duration-150 ease-out"
+                />
+              </div>
+
+              {/* Overall Progress Bar Track */}
+              <div className="pt-1 border-t border-[#3A3A3D]/60 flex items-center justify-between text-[10px] text-[#888783]">
+                <span>전체 공정</span>
+                <span className="tabular-nums font-medium text-[#C2C1BB]">
+                  {progressInfo?.overallPercent ?? Math.round(progressPercent)}% / 100%
+                </span>
+              </div>
             </div>
           </div>
         </div>
