@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <title>SensorClean</title>
+  <rect width="128" height="128" rx="28" fill="#2B2B2E" />
+  <!-- Sensor chip pins -->
+  <path d="M16 46h12M16 64h12M16 82h12M100 46h12M100 64h12M100 82h12" stroke="#C2C1BB" stroke-width="5" stroke-linecap="round" />
+  <!-- Sensor die -->
+  <rect x="28" y="28" width="72" height="72" rx="10" fill="none" stroke="#C2C1BB" stroke-width="6" />
+  <!-- Dust spot being marked -->
+  <circle cx="64" cy="64" r="17" fill="none" stroke="#8FA06F" stroke-width="6" stroke-dasharray="7 5" />
+  <circle cx="64" cy="64" r="4.5" fill="#8FA06F" />
+</svg>
