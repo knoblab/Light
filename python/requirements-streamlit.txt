@@ -1,0 +1,4 @@
+# Standalone Streamlit demo (python/app.py) only. Not needed by the web app.
+-r requirements.txt
+streamlit>=1.40.0
+Pillow>=10.4.0

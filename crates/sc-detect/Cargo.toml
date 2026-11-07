@@ -1,0 +1,14 @@
+[package]
+name = "sc-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean dual-branch (Sharp + Bokeh) sensor dust detector and plane-detrended annulus SNR verifier"
+
+[dependencies]
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sc-core = { path = "../sc-core" }
+sc-color = { path = "../sc-color" }
+sc-imgproc = { path = "../sc-imgproc" }

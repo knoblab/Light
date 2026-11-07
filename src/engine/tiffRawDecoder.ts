@@ -1,4 +1,4 @@
-import { ColorSpaceId, ExifMetadata } from '../types/sensor';
+import { ColorSpaceId, DecodeKind, ExifMetadata } from '../types/sensor';
 import * as UTIF from 'utif';
 
 export interface DecodedImagePayload {
@@ -10,6 +10,7 @@ export interface DecodedImagePayload {
   lut16ToOrig8G: Uint8Array; // 65536-entry LUT mapping linear16 G -> origRgb8 G
   lut16ToOrig8B: Uint8Array; // 65536-entry LUT mapping linear16 B -> origRgb8 B
   isRaw: boolean;
+  decodeKind: DecodeKind;
   isLinear16?: boolean;
   extension: string;
   exposureScale: number;
@@ -1024,6 +1025,8 @@ function decodeWithUtifFallback(
 
     for (const candidate of allIfds) {
       try {
+        // A Bayer mosaic (CFA) is not an RGB image; reading it as one would yield a gray checkerboard
+        if (candidate.t262?.[0] === 32803) continue;
         UTIF.decodeImage(buffer, candidate);
         const w = candidate.width || 0;
         const h = candidate.height || 0;
@@ -1726,6 +1729,7 @@ export async function decodeImageFileLocal(
       lut16ToOrig8G: lutG,
       lut16ToOrig8B: lutB,
       isRaw,
+      decodeKind: isRaw ? 'raw-linear16' : 'image-16bit',
       isLinear16: isRaw || exposureScale > 1.05,
       extension: ext.toUpperCase(),
       exposureScale,
@@ -1756,6 +1760,7 @@ export async function decodeImageFileLocal(
       lut16ToOrig8G: LINEAR16_TO_SRGB8_LUT,
       lut16ToOrig8B: LINEAR16_TO_SRGB8_LUT,
       isRaw,
+      decodeKind: isRaw ? 'embedded-preview' : 'image-8bit',
       isLinear16: true,
       extension: ext.toUpperCase(),
       exposureScale: 1.0,
@@ -1827,6 +1832,7 @@ export async function decodeImageFileLocal(
     lut16ToOrig8G: LINEAR16_TO_SRGB8_LUT,
     lut16ToOrig8B: LINEAR16_TO_SRGB8_LUT,
     isRaw,
+    decodeKind: isRaw ? 'embedded-preview' : 'image-8bit',
     extension: ext.toUpperCase(),
     exposureScale: 1.0,
     detectedColorSpace,

@@ -96,10 +96,26 @@ export interface ExifMetadata {
   rawGpsBytes?: Uint8Array;
 }
 
+/**
+ * What the pixel data of a session really is:
+ *  - raw-linear16: true 16-bit linear sensor-derived RGB read from the file (e.g. linear DNG)
+ *  - raw-developed: RAW developed to linear RGB by LibRaw (demosaiced, not the original CFA data)
+ *  - image-16bit / image-8bit: an ordinary image file (TIFF/PNG/JPEG), not RAW
+ *  - embedded-preview: a RAW container whose sensor data could not be decoded; only the camera's
+ *    embedded 8-bit preview JPEG was used
+ */
+export type DecodeKind =
+  | 'raw-linear16'
+  | 'raw-developed'
+  | 'image-16bit'
+  | 'image-8bit'
+  | 'embedded-preview';
+
 export interface SessionMetadata {
   originalFileName: string;
   extension: string;
   isRaw: boolean;
+  decodeKind?: DecodeKind;
   isLinear16?: boolean;
   fullWidth: number;
   fullHeight: number;

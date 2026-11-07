@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-SensorClean Pro — 16-bit Linear RW2/RAW Dual-Branch Sensor Dust Detection & Telea Inpainting Engine
+SensorClean — 16-bit Linear RW2/RAW Dual-Branch Sensor Dust Detection & Telea Inpainting Engine
 Architecture:
-  - Always operates at high detection resolution (up to 2304px directly from linear_16bit.npy)
-    so tiny focused sensor dust specks (r = 2px ~ 12px) are never blurred out by low-res previews.
+  - Detection runs on a copy downscaled to at most 2304px (det_gray.npy); healing runs on the
+    full-resolution linear_16bit.npy. Small specks on high-resolution sensors can fall below the
+    detection resolution (see docs/RAW_PRODUCTION_PLAN.md, Phase 3).
   - Branch A (Sharp / Focused Micro-Dust): High-resolution local DoG/Black-Hat (g_8.5 - g_0.9)
     without gradient suppression, catching crisp dark sensor dust particles and micro-fibers.
   - Branch B (Defocused / Bokeh Dust): 8-Scale Center-Surround DoG Pyramid (r = 5px ~ 42px)
@@ -13,11 +14,12 @@ Architecture:
     surrounding annulus ring (1.45r <= d <= 2.55r) and measures:
       1) plane_center (background brightness): rejects dark foreground ground/trees/shadows
       2) ann_std (plane-detrended outer annulus standard deviation):
-         - Real dust on sky has ann_std = 0.35 ~ 1.80
-         - Cloud pockets (#35, #42, #43, #53, #55) have ann_std = 5.8 ~ 22.0 -> 100% rejected!
+         - Dust on clear sky had ann_std of roughly 0.35 ~ 1.80 on the tuning samples
+         - Cloud texture had much higher values and is rejected by the threshold
       3) annulus_snr = spot_depth / ann_std:
-         - Real dust has SNR = 3.2 ~ 18.5
-         - Cloud pockets have SNR = 1.2 ~ 2.8 -> 100% rejected!
+         - Dust on the tuning samples had SNR of roughly 3.2 ~ 18.5, cloud pockets 1.2 ~ 2.8
+         - These ranges were tuned on a small sample set; thresholds are not yet validated
+           against a benchmark (Phase 3 of the plan).
       4) p15_diff (15th percentile darkest annulus pixel vs core): ensures omnidirectional enclosure.
 """
 
@@ -119,6 +121,24 @@ def extract_exif_metadata(file_path: str) -> Dict[str, Any]:
 
 
 cv2.setUseOptimized(True)
+
+
+def imwrite_unicode(path: str, image: np.ndarray, params: Optional[List[int]] = None) -> None:
+    """cv2.imwrite replacement that works with non-ASCII paths on Windows."""
+    ext = os.path.splitext(path)[1] or ".png"
+    ok, encoded = cv2.imencode(ext, image, params or [])
+    if not ok:
+        raise ValueError(f"이미지를 인코딩할 수 없습니다: {path}")
+    encoded.tofile(path)
+
+
+def imread_unicode(path: str, flags: int = cv2.IMREAD_UNCHANGED) -> Optional[np.ndarray]:
+    """cv2.imread replacement that works with non-ASCII paths on Windows."""
+    data = np.fromfile(path, dtype=np.uint8)
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
 
 # Precomputed 256-entry LUT mapping 8-bit sRGB (0..255) -> 16-bit Linear RGB (0..65535 uint16)
 _NORM_256 = np.arange(256, dtype=np.float32) / 255.0
@@ -243,6 +263,7 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
     exif_meta = extract_exif_metadata(input_path)
 
     is_raw = ext in RAW_EXTENSIONS
+    decode_kind = "raw-developed" if is_raw else "image-8bit"
     camera_wb = [1.0, 1.0, 1.0, 1.0]
     color_matrix: List[List[float]] = []
     black_level = [0, 0, 0, 0]
@@ -292,19 +313,27 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
                                 exposure_scale_override = float(np.clip(thumb_p85 / lin_p85, 0.5, 16.0))
                 except Exception:
                     pass
-        except Exception:
-            tif_arr = tifffile.imread(input_path)
+        except Exception as raw_err:
+            # LibRaw could not read the file. Only accept a TIFF-readable RGB image (e.g. a linear DNG);
+            # a single-channel page is a Bayer mosaic and must not be passed off as an image.
+            try:
+                tif_arr = tifffile.imread(input_path)
+            except Exception:
+                raise ValueError(f"RAW 파일을 디코딩할 수 없습니다 (LibRaw: {raw_err})") from raw_err
             if tif_arr.ndim == 2:
-                tif_arr = np.stack([tif_arr] * 3, axis=-1)
-            elif tif_arr.shape[2] > 3:
+                raise ValueError(
+                    f"지원되지 않는 RAW 형식입니다 (LibRaw: {raw_err})"
+                ) from raw_err
+            if tif_arr.shape[2] > 3:
                 tif_arr = tif_arr[:, :, :3]
             if tif_arr.dtype == np.uint8:
+                decode_kind = "embedded-preview"
                 linear_rgb_16 = (np.power(tif_arr.astype(np.float32) / 255.0, 2.2) * 65535.0).astype(np.uint16)
                 exposure_scale_override = 1.0
             else:
                 linear_rgb_16 = tif_arr.astype(np.uint16)
     else:
-        bgr = cv2.imread(input_path, cv2.IMREAD_UNCHANGED)
+        bgr = imread_unicode(input_path, cv2.IMREAD_UNCHANGED)
         if bgr is None:
             raise ValueError(f"이미지를 디코딩할 수 없습니다: {input_path}")
         if bgr.ndim == 2:
@@ -322,6 +351,8 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
             exposure_scale_override = 1.0
 
     is_input_16bit = bool(not is_raw and 'rgb' in locals() and rgb.dtype == np.uint16)
+    if is_input_16bit:
+        decode_kind = "image-16bit"
     full_h, full_w = int(linear_rgb_16.shape[0]), int(linear_rgb_16.shape[1])
     np.save(os.path.join(session_dir, "linear_16bit.npy"), linear_rgb_16)
 
@@ -349,7 +380,7 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
     np.save(os.path.join(session_dir, "work_srgb_u8.npy"), srgb_preview_u8)
     preview_bgr = cv2.cvtColor(srgb_preview_u8, cv2.COLOR_RGB2BGR)
     preview_path = os.path.join(session_dir, "preview_original.jpg")
-    cv2.imwrite(preview_path, preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+    imwrite_unicode(preview_path, preview_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
 
     # Pre-cache 2304px perceptual luminance array so dust detection / re-detection starts in <3ms
     if is_input_16bit:
@@ -372,6 +403,7 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
         "originalFileName": os.path.basename(input_path),
         "extension": ext.upper().lstrip('.'),
         "isRaw": is_raw,
+        "decodeKind": decode_kind,
         "isInput16Bit": is_input_16bit,
         "isLinear16": bool(is_raw or not is_input_16bit),
         "fullWidth": full_w,
@@ -380,8 +412,18 @@ def ingest_image(input_path: str, session_dir: str) -> Dict[str, Any]:
         "workHeight": work_h,
         "workScale": scale,
         "exposureScale": exposure_scale,
-        "bitDepth": "16-bit Linear (uint16)" if not is_input_16bit else "16-bit Lossless RGB (uint16)",
-        "colorSpace": "Camera Linear RGB (Gamma 1.0)" if is_raw else ("16-bit Original RGB" if is_input_16bit else "Linearized 16-bit RGB"),
+        "bitDepth": {
+            "raw-developed": "16-bit 선형 RGB (LibRaw 현상)",
+            "embedded-preview": "8-bit 내장 미리보기 (센서 데이터 아님)",
+            "image-16bit": "16-bit RGB",
+            "image-8bit": "8-bit 이미지 (16-bit 선형으로 변환)",
+        }.get(decode_kind, "16-bit"),
+        "colorSpace": {
+            "raw-developed": "선형 RGB, sRGB 원색 (LibRaw 현상, gamma 1.0)",
+            "embedded-preview": "sRGB 추정",
+            "image-16bit": "16-bit 원본 RGB",
+            "image-8bit": "sRGB 추정 (선형화)",
+        }.get(decode_kind, "RGB"),
         "cameraWb": camera_wb[:4],
         "colorMatrix": color_matrix,
         "blackLevel": black_level,
@@ -942,7 +984,7 @@ def detect_sensor_dust(session_dir: str, params: Dict[str, Any]) -> Dict[str, An
             255,
             -1
         )
-    cv2.imwrite(os.path.join(session_dir, "mask_auto.png"), filtered_mask)
+    imwrite_unicode(os.path.join(session_dir, "mask_auto.png"), filtered_mask)
 
     vis_work = cv2.resize(combined_vis_det, (work_w, work_h), interpolation=cv2.INTER_LINEAR) if (det_h, det_w) != (work_h, work_w) else combined_vis_det
     vis_scale = max(float(np.percentile(vis_work, 99.3)), 2.5)
@@ -957,7 +999,7 @@ def detect_sensor_dust(session_dir: str, params: Dict[str, Any]) -> Dict[str, An
             1,
             lineType=cv2.LINE_AA
         )
-    cv2.imwrite(os.path.join(session_dir, "viz_bw_edge.jpg"), bw_viz, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
+    imwrite_unicode(os.path.join(session_dir, "viz_bw_edge.jpg"), bw_viz, [int(cv2.IMWRITE_JPEG_QUALITY), 94])
 
     detection_result = {
         "method": method,
@@ -1068,7 +1110,7 @@ def _boxes_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -
 
 def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Zero-Halo 16-bit Plane-Detrended Harmonic + Telea Inpainting with Incremental Checkpoint Cache:
+    16-bit Plane-Detrended Harmonic + Telea Inpainting with Incremental Checkpoint Cache:
       - Maintains an in-memory 16-bit checkpoint (`checkpoint_16bit`) and 8-bit preview checkpoint (`checkpoint_work_u8`).
       - If no spots or strokes changed since the last checkpoint, returns immediately in 0ms (`fromCache: True`).
       - When spots/strokes are added or removed with the pen tools, only the affected delta ROI bounding boxes
@@ -1151,7 +1193,7 @@ def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, 
         return cached_res
 
     work_mask = build_combined_mask(work_h, work_w, work_scale, active_spots, manual_strokes)
-    cv2.imwrite(os.path.join(session_dir, "mask_final_work.png"), work_mask)
+    imwrite_unicode(os.path.join(session_dir, "mask_final_work.png"), work_mask)
 
     if (full_h, full_w) != (work_h, work_w):
         full_mask = cv2.resize(work_mask, (full_w, full_h), interpolation=cv2.INTER_NEAREST)
@@ -1374,7 +1416,7 @@ def inpaint_16bit_linear(session_dir: str, params: Dict[str, Any]) -> Dict[str, 
 
     np.save(os.path.join(session_dir, "inpainted_16bit.npy"), checkpoint_16bit)
     healed_bgr = cv2.cvtColor(checkpoint_work_u8, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(os.path.join(session_dir, "preview_inpainted.jpg"), healed_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
+    imwrite_unicode(os.path.join(session_dir, "preview_inpainted.jpg"), healed_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 96])
 
     result_info = {
         "healedSpotsCount": enabled_spot_count,
@@ -1407,7 +1449,7 @@ def write_linear_dng(
     meta: Dict[str, Any]
 ) -> None:
     """
-    Writes a zero-DR-loss Dual-IFD DNG 1.4 file:
+    Writes a Dual-IFD LinearRaw DNG 1.4 file (demosaiced linear RGB, not the original CFA data):
       - SubIFD0 stores the unclipped 16-bit Linear RGB sensor array (`0..65535`) with zero exposure multiplication.
       - IFD0 stores DNG Tag 50730 (`BaselineExposure`) so Lightroom/Camera Raw renders at the calibrated brightness
         while retaining 100% of highlight headroom.
@@ -1515,7 +1557,7 @@ def export_healed_image(
     is_input_16bit = bool(meta.get("isInput16Bit", False))
 
     if fmt == "dng":
-        # Zero-DR-Loss DNG: write unclipped 16-bit linear values directly; BaselineExposure tag handles preview brightness
+        # LinearRaw DNG: write the 16-bit linear values directly; BaselineExposure tag handles preview brightness
         if is_input_16bit:
             srgb_u8 = np.clip(np.round(rgb_16bit.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
         else:
@@ -1545,7 +1587,7 @@ def export_healed_image(
         else:
             srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
         bgr_u8 = cv2.cvtColor(srgb_u8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(output_path, bgr_u8)
+        imwrite_unicode(output_path, bgr_u8)
         mime_type = "image/png"
         ext = "png"
     else:
@@ -1554,7 +1596,7 @@ def export_healed_image(
         else:
             srgb_u8, _ = linear_16bit_to_srgb_8bit(rgb_16bit, exposure_scale=exposure_scale)
         bgr_u8 = cv2.cvtColor(srgb_u8, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(output_path, bgr_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 98])
+        imwrite_unicode(output_path, bgr_u8, [int(cv2.IMWRITE_JPEG_QUALITY), 98])
         mime_type = "image/jpeg"
         ext = "jpg"
 
@@ -1780,6 +1822,8 @@ def execute_command(args: List[str]) -> Dict[str, Any]:
 
 def run_worker_loop() -> None:
     """Persistent warm worker loop reading JSON command lines from stdin."""
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     for line in sys.stdin:
         line = line.strip()
         if not line:

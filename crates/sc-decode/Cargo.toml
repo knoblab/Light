@@ -1,0 +1,26 @@
+[package]
+name = "sc-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean RAW & image decoding adapter, CFA DNG writer wrapper, and panic isolation"
+
+[dependencies]
+image = { workspace = true }
+jpeg-encoder = { workspace = true }
+lightcraft-color = { workspace = true }
+lightcraft-geom = { workspace = true }
+lightcraft-meta = { workspace = true }
+lightcraft-raster = { workspace = true }
+lightcraft-raw = { workspace = true }
+lightcraft-tiff = { workspace = true }
+rayon = { workspace = true }
+sc-color = { path = "../sc-color" }
+sc-core = { path = "../sc-core" }
+sc-imgproc = { path = "../sc-imgproc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

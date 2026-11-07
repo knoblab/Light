@@ -18,10 +18,10 @@ export const PipelineArchitectureView: React.FC<PipelineArchitectureViewProps> =
       <div className="max-w-5xl mx-auto space-y-8">
         <div className="pb-5 border-b border-[#22262E]">
           <h2 className="text-2xl font-semibold text-white">
-            16-bit 선형 RW2 → 무손실 Linear DNG 처리 아키텍처
+            16-bit 선형 RAW 처리 흐름
           </h2>
           <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
-            카메라 센서의 16-bit 다이내믹 레인지와 선형 감마(Linear Gamma 1.0)를 훼손하지 않고 먼지 영역 픽셀만 정밀 치환하여 Lightroom · Camera Raw · Capture One에서 RAW 현상이 가능한 Linear DNG로 출력합니다.
+            RAW를 LibRaw로 16-bit 선형 RGB(감마 1.0)로 현상한 뒤 먼지 영역 픽셀만 치환하고, 선형 RGB DNG·TIFF 등으로 출력합니다. 원본 CFA 데이터를 보존하는 DNG 출력은 개발 예정입니다.
           </p>
         </div>
 
@@ -34,7 +34,7 @@ export const PipelineArchitectureView: React.FC<PipelineArchitectureViewProps> =
                 백엔드 Python 16-bit 비전 엔진 활성 상태
               </div>
               <div className="text-xs text-neutral-400 mt-0.5">
-                모든 업로드 파일은 브라우저 8-bit 캔버스가 아닌 서버의 Python C++ 네이티브 배열(`uint16` / `float32`)에서 직접 처리됩니다.
+                업로드 파일은 브라우저가 아닌 서버의 Python 엔진(NumPy `uint16` / `float32` 배열)에서 처리됩니다.
               </div>
             </div>
           </div>
@@ -113,10 +113,10 @@ for ch in range(3):
           <div className="p-5 rounded-xl bg-[#131519] border border-[#22262E] space-y-3">
             <div className="flex items-center gap-2.5 text-amber-400 font-semibold text-sm">
               <FileOutput className="w-4 h-4" />
-              <span>04. 무손실 선형 DNG (Linear DNG 1.4) 패킹</span>
+              <span>04. 선형 RGB DNG (LinearRaw, DNG 1.4) 패킹</span>
             </div>
             <p className="text-xs text-neutral-300 leading-relaxed">
-              복원된 16-bit 선형 배열에 Adobe DNG 1.4 표준 헤더 태그(`DNGVersion`, `UniqueCameraModel`, `BlackLevel`, `WhiteLevel`)와 카메라 메타데이터를 기록하여 현상 소프트웨어에서 즉시 열 수 있는 `.dng` 파일을 생성합니다.
+              복원된 16-bit 선형 배열에 DNG 1.4 헤더 태그(`DNGVersion`, `UniqueCameraModel`, `BlackLevel`, `WhiteLevel`)와 카메라 메타데이터를 기록해 `.dng` 파일을 생성합니다.
             </p>
             <pre className="p-3 rounded-lg bg-[#0B0C0E] border border-[#22262E] text-[11px] font-mono text-neutral-300 overflow-x-auto">
 {`extra_tags = [

@@ -6,3 +6,14 @@ coverage/
 *.log
 .env*
 !.env.example
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+target/
+.antigravitycli/
+.aistudio/
+

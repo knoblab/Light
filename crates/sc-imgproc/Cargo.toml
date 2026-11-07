@@ -1,0 +1,12 @@
+[package]
+name = "sc-imgproc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust image processing primitives replacing OpenCV for SensorClean (Gaussian, INTER_AREA, Sobel, morphology, EDT, contours)"
+
+[dependencies]
+rayon = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

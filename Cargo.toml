@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sc-core",
+    "crates/sc-imgproc",
+    "crates/sc-color",
+    "crates/sc-detect",
+    "crates/sc-decode",
+    "crates/sc-session",
+    "crates/sc-server",
+    "crates/sc-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+lightcraft-raw = { path = "../../lightcraft/crates/raw", default-features = false }
+lightcraft-tiff = { path = "../../lightcraft/crates/tiff" }
+lightcraft-meta = { path = "../../lightcraft/crates/meta" }
+lightcraft-color = { path = "../../lightcraft/crates/color" }
+lightcraft-raster = { path = "../../lightcraft/crates/raster" }
+lightcraft-geom = { path = "../../lightcraft/crates/geom" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+rayon = "1.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+png = "0.17"
+jpeg-encoder = "0.6"
+memmap2 = "0.9"
+axum = { version = "0.7", features = ["multipart", "macros"] }
+tokio = { version = "1.40", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "limit", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+proptest = "1.5"
+tempfile = "3.13"

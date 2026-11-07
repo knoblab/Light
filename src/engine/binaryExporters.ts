@@ -231,6 +231,31 @@ function writeIfdBlock(
   return extraOffset;
 }
 
+function alignUp(value: number, alignment: number): number {
+  return Math.ceil(value / alignment) * alignment;
+}
+
+/** Byte size of an IFD block as laid out by writeIfdBlock: entry table plus out-of-line tag data. */
+function measureIfdBlock(entries: TiffTagEntry[]): number {
+  let size = alignUp(2 + entries.length * 12 + 4, 2);
+  for (const e of entries) {
+    const bytes = getTiffTypeByteSize(e.type) * e.count;
+    if (bytes > 4) size = alignUp(size + bytes, 2);
+  }
+  return size;
+}
+
+// Classic TIFF stores offsets as uint32, so a single file cannot exceed 4 GiB.
+const TIFF_MAX_FILE_BYTES = 0xffffffff;
+
+function assertTiffFits(totalBytes: number, label: string): void {
+  if (totalBytes > TIFF_MAX_FILE_BYTES) {
+    throw new Error(
+      `${label} 파일이 클래식 TIFF 한계(4GB)를 넘습니다 (${Math.round(totalBytes / 1048576)}MB).`
+    );
+  }
+}
+
 // Precomputed CRC32 table for standard ZIP archive & PNG chunk generation
 const CRC32_TABLE = new Uint32Array(256);
 (function initCrc32() {
@@ -341,7 +366,32 @@ export function buildExifIfdEntries(meta: SessionMetadata): TiffTagEntry[] {
 }
 
 function buildSyntheticExifTiffBuffer(meta: SessionMetadata): ArrayBuffer {
-  const buf = new ArrayBuffer(8192);
+  const makeStr = meta.exif?.make || 'Camera';
+  const modelStr = meta.exif?.model || 'Sensor';
+  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
+
+  const buildIfd0Entries = (exifIfdOffset: number): TiffTagEntry[] => {
+    const entries: TiffTagEntry[] = [
+      makeLongTag(256, [meta.fullWidth || 0]),
+      makeLongTag(257, [meta.fullHeight || 0]),
+      makeAsciiTag(271, makeStr),
+      makeAsciiTag(272, modelStr),
+      makeShortTag(274, [1]), // Orientation = 1 (Normal)
+      makeAsciiTag(305, meta.exif?.software || 'SensorClean'),
+      makeAsciiTag(306, dateStr),
+      makeLongTag(34665, [exifIfdOffset]),
+    ];
+    if (meta.exif?.artist) entries.push(makeAsciiTag(315, meta.exif.artist));
+    if (meta.exif?.copyright) entries.push(makeAsciiTag(33432, meta.exif.copyright));
+    return entries;
+  };
+  const exifIfdEntries = buildExifIfdEntries(meta);
+
+  const ifd0Offset = 8;
+  const exifIfdOffset = alignUp(ifd0Offset + measureIfdBlock(buildIfd0Entries(0)), 2);
+  const totalSize = alignUp(exifIfdOffset + measureIfdBlock(exifIfdEntries), 2);
+
+  const buf = new ArrayBuffer(totalSize);
   const view = new DataView(buf);
   const u8 = new Uint8Array(buf);
 
@@ -349,33 +399,11 @@ function buildSyntheticExifTiffBuffer(meta: SessionMetadata): ArrayBuffer {
   u8[0] = 0x49;
   u8[1] = 0x49;
   view.setUint16(2, 42, true);
-  view.setUint32(4, 8, true);
+  view.setUint32(4, ifd0Offset, true);
 
-  const makeStr = meta.exif?.make || 'Camera';
-  const modelStr = meta.exif?.model || 'Sensor';
-  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
-  const exifIfdOffset = 1024;
-
-  const ifd0Entries: TiffTagEntry[] = [
-    makeLongTag(256, [meta.fullWidth || 0]),
-    makeLongTag(257, [meta.fullHeight || 0]),
-    makeAsciiTag(271, makeStr),
-    makeAsciiTag(272, modelStr),
-    makeShortTag(274, [1]), // Orientation = 1 (Normal)
-    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro'),
-    makeAsciiTag(306, dateStr),
-    makeLongTag(34665, [exifIfdOffset]),
-  ];
-  if (meta.exif?.artist) ifd0Entries.push(makeAsciiTag(315, meta.exif.artist));
-  if (meta.exif?.copyright) ifd0Entries.push(makeAsciiTag(33432, meta.exif.copyright));
-
-  const exifIfdEntries = buildExifIfdEntries(meta);
-
-  const ifd0End = writeIfdBlock(view, 8, ifd0Entries, 0);
-  const exifIfdEnd = writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
-
-  const totalUsed = Math.max(ifd0End, exifIfdEnd);
-  return buf.slice(0, totalUsed + (totalUsed % 2));
+  writeIfdBlock(view, ifd0Offset, buildIfd0Entries(exifIfdOffset), 0);
+  writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
+  return buf;
 }
 
 /**
@@ -648,11 +676,17 @@ export async function injectIccProfileToJpegBlob(jpegBlob: Blob, iccBytes: Uint8
 }
 
 /**
- * Builds a standard Dual-IFD 16-bit Linear DNG 1.4 binary ArrayBuffer:
- *   - IFD0: High-resolution 8-bit RGB preview with 100% original camera color & contrast,
- *     paired with embedded Tag 34675 (ICCProfile), ExifIFD pointer (Tag 34665), and XMP (Tag 700)
- *   - ExifIFD: Complete camera make, model, lens, exposure time, aperture, ISO, and shooting tags
- *   - SubIFD0: Full-resolution 16-bit LinearRaw RGB with D65 ColorMatrix1 + ProfileToneCurve
+ * Maximum long edge of the IFD0 preview in written DNG files. The full-resolution image lives in
+ * SubIFD0; keeping the preview small avoids holding a second full-size 8-bit copy in memory.
+ */
+const DNG_PREVIEW_MAX_DIM = 1024;
+
+/**
+ * Builds a 16-bit LinearRaw DNG 1.4 binary ArrayBuffer:
+ *   - IFD0: reduced-resolution 8-bit RGB preview, ICCProfile (34675), ExifIFD pointer (34665), XMP (700)
+ *   - ExifIFD: camera make/model, lens, exposure, aperture, ISO and shooting tags
+ *   - SubIFD0: full-resolution 16-bit LinearRaw RGB with D65 ColorMatrix1
+ * Block offsets are computed from the actual tag sizes, so ICC/XMP payloads of any size are safe.
  */
 export function writeLinearDngBuffer(
   healedRgb8: Uint8Array,
@@ -663,10 +697,11 @@ export function writeLinearDngBuffer(
   targetColorSpace: ColorSpaceId = 'auto',
   customIccProfile?: Uint8Array
 ): ArrayBuffer {
-  // Always keep IFD0 at 100% full original resolution (never downscale)
-  const prevW = fullW;
-  const prevH = fullH;
-  const prevRgb8 = healedRgb8;
+  const prevScale = Math.min(1, DNG_PREVIEW_MAX_DIM / Math.max(fullW, fullH));
+  const prevW = Math.max(1, Math.round(fullW * prevScale));
+  const prevH = Math.max(1, Math.round(fullH * prevScale));
+  const prevRgb8 =
+    prevScale < 1 ? resizeRgb8Area(healedRgb8, fullW, fullH, prevW, prevH) : healedRgb8;
 
   const makeStr = meta.exif?.make || 'Panasonic';
   const modelStr = meta.exif?.model || 'Lumix Camera Sensor';
@@ -692,102 +727,113 @@ export function writeLinearDngBuffer(
   const prevByteCount = prevW * prevH * 3;
   const raw16ByteCount = fullW * fullH * 3 * 2;
 
-  // Reserve 32768 bytes for headers + IFD0 + ExifIFD + SubIFD0 + ICC profile + XMP
-  const headerReserve = 32768;
-  const prevStripOffset = headerReserve;
-  const raw16StripOffset = prevStripOffset + prevByteCount + (prevByteCount % 2);
-  const totalBufferSize = raw16StripOffset + raw16ByteCount;
+  interface DngOffsets {
+    exifIfd: number;
+    subIfd: number;
+    prevStrip: number;
+    rawStrip: number;
+  }
+
+  const buildEntries = (o: DngOffsets) => {
+    const ifd0: TiffTagEntry[] = [
+      makeLongTag(254, [1]), // NewSubfileType = 1 (Preview / Reduced-res)
+      makeLongTag(256, [prevW]),
+      makeLongTag(257, [prevH]),
+      makeShortTag(258, [8, 8, 8]),
+      makeShortTag(259, [1]), // Uncompressed
+      makeShortTag(262, [2]), // Photometric = RGB
+      makeAsciiTag(271, makeStr),
+      makeAsciiTag(272, modelStr),
+      makeLongTag(273, [o.prevStrip]),
+      makeShortTag(274, [1]), // Orientation = TopLeft
+      makeShortTag(277, [3]), // SamplesPerPixel = 3
+      makeLongTag(278, [prevH]),
+      makeLongTag(279, [prevByteCount]),
+      makeRationalTag(282, [[72, 1]]),
+      makeRationalTag(283, [[72, 1]]),
+      makeShortTag(284, [1]), // PlanarConfig = Contig
+      makeShortTag(296, [2]), // ResolutionUnit = Inch
+      makeAsciiTag(305, meta.exif?.software || 'SensorClean'),
+      makeAsciiTag(306, dateStr),
+      makeLongTag(330, [o.subIfd]), // SubIFDs pointer -> SubIFD0
+      makeLongTag(34665, [o.exifIfd]), // ExifIFD pointer
+      makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
+      makeByteTag(50706, [1, 4, 0, 0]), // DNGVersion 1.4.0.0
+      makeByteTag(50707, [1, 1, 0, 0]), // DNGBackwardVersion 1.1.0.0
+      makeAsciiTag(50708, uniqueModel), // UniqueCameraModel
+      makeSRationalTag(50721, colorMatrix1), // ColorMatrix1
+      makeRationalTag(50728, [[10000, 10000], [10000, 10000], [10000, 10000]]), // AsShotNeutral
+      makeSRationalTag(50730, [[baselineEvNum, 100]]), // BaselineExposure
+      makeShortTag(50740, [21]), // CalibrationIlluminant1 = D65
+      makeAsciiTag(50936, profileName), // ProfileName
+    ];
+
+    if (meta.exif?.artist) ifd0.push(makeAsciiTag(315, meta.exif.artist));
+    if (meta.exif?.copyright) ifd0.push(makeAsciiTag(33432, meta.exif.copyright));
+    if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
+      ifd0.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
+    }
+
+    const sub: TiffTagEntry[] = [
+      makeLongTag(254, [0]), // NewSubfileType = 0 (Full-res Main Image)
+      makeLongTag(256, [fullW]),
+      makeLongTag(257, [fullH]),
+      makeShortTag(258, [16, 16, 16]),
+      makeShortTag(259, [1]), // Uncompressed
+      makeShortTag(262, [34892]), // Photometric = LinearRaw
+      makeLongTag(273, [o.rawStrip]),
+      makeShortTag(277, [3]),
+      makeLongTag(278, [fullH]),
+      makeLongTag(279, [raw16ByteCount]),
+      makeRationalTag(282, [[72, 1]]),
+      makeRationalTag(283, [[72, 1]]),
+      makeShortTag(284, [1]),
+      makeShortTag(296, [2]),
+      makeLongTag(50714, [0, 0, 0]), // BlackLevel
+      makeLongTag(50717, [65535, 65535, 65535]), // WhiteLevel
+    ];
+
+    return { ifd0, exif: buildExifIfdEntries(meta), sub };
+  };
+
+  const sizing = buildEntries({ exifIfd: 0, subIfd: 0, prevStrip: 0, rawStrip: 0 });
+  const ifd0Offset = 8;
+  const exifIfdOffset = alignUp(ifd0Offset + measureIfdBlock(sizing.ifd0), 2);
+  const subIfdOffset = alignUp(exifIfdOffset + measureIfdBlock(sizing.exif), 2);
+  const prevStripOffset = alignUp(subIfdOffset + measureIfdBlock(sizing.sub), 16);
+  const rawStripOffset = alignUp(prevStripOffset + prevByteCount, 16);
+  const totalBufferSize = rawStripOffset + raw16ByteCount;
+  assertTiffFits(totalBufferSize, 'DNG');
 
   const buffer = new ArrayBuffer(totalBufferSize);
   const view = new DataView(buffer);
   const u8 = new Uint8Array(buffer);
 
-  // Little-Endian TIFF magic header: 'II', 42, offset to IFD0 = 8
+  // Little-Endian TIFF magic header: 'II', 42, offset to IFD0
   u8[0] = 0x49;
   u8[1] = 0x49;
   view.setUint16(2, 42, true);
-  view.setUint32(4, 8, true);
+  view.setUint32(4, ifd0Offset, true);
 
-  const exifIfdOffset = 2048;
-  const subIfdOffset = 6144;
+  const entries = buildEntries({
+    exifIfd: exifIfdOffset,
+    subIfd: subIfdOffset,
+    prevStrip: prevStripOffset,
+    rawStrip: rawStripOffset,
+  });
+  writeIfdBlock(view, ifd0Offset, entries.ifd0, 0);
+  writeIfdBlock(view, exifIfdOffset, entries.exif, 0);
+  writeIfdBlock(view, subIfdOffset, entries.sub, 0);
 
-  const ifd0Entries: TiffTagEntry[] = [
-    makeLongTag(254, [1]), // NewSubfileType = 1 (Preview / Reduced-res)
-    makeLongTag(256, [prevW]),
-    makeLongTag(257, [prevH]),
-    makeShortTag(258, [8, 8, 8]),
-    makeShortTag(259, [1]), // Uncompressed
-    makeShortTag(262, [2]), // Photometric = RGB
-    makeAsciiTag(271, makeStr),
-    makeAsciiTag(272, modelStr),
-    makeLongTag(273, [prevStripOffset]),
-    makeShortTag(274, [1]), // Orientation = TopLeft
-    makeShortTag(277, [3]), // SamplesPerPixel = 3
-    makeLongTag(278, [prevH]),
-    makeLongTag(279, [prevByteCount]),
-    makeRationalTag(282, [[72, 1]]),
-    makeRationalTag(283, [[72, 1]]),
-    makeShortTag(284, [1]), // PlanarConfig = Contig
-    makeShortTag(296, [2]), // ResolutionUnit = Inch
-    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro Wide-Gamut DNG Engine'),
-    makeAsciiTag(306, dateStr),
-    makeLongTag(330, [subIfdOffset]), // SubIFDs pointer -> SubIFD0
-    makeLongTag(34665, [exifIfdOffset]), // ExifIFD pointer
-    makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
-    makeByteTag(50706, [1, 4, 0, 0]), // DNGVersion 1.4.0.0
-    makeByteTag(50707, [1, 1, 0, 0]), // DNGBackwardVersion 1.1.0.0
-    makeAsciiTag(50708, uniqueModel), // UniqueCameraModel
-    makeSRationalTag(50721, colorMatrix1), // ColorMatrix1
-    makeRationalTag(50728, [[10000, 10000], [10000, 10000], [10000, 10000]]), // AsShotNeutral
-    makeSRationalTag(50730, [[baselineEvNum, 100]]), // BaselineExposure (zero highlight clipping!)
-    makeShortTag(50740, [21]), // CalibrationIlluminant1 = D65
-    makeAsciiTag(50936, profileName), // ProfileName
-  ];
-
-  if (meta.exif?.artist) ifd0Entries.push(makeAsciiTag(315, meta.exif.artist));
-  if (meta.exif?.copyright) ifd0Entries.push(makeAsciiTag(33432, meta.exif.copyright));
-  if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
-    ifd0Entries.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
-  }
-
-  const exifIfdEntries = buildExifIfdEntries(meta);
-
-  const subIfdEntries: TiffTagEntry[] = [
-    makeLongTag(254, [0]), // NewSubfileType = 0 (Full-res Main Image)
-    makeLongTag(256, [fullW]),
-    makeLongTag(257, [fullH]),
-    makeShortTag(258, [16, 16, 16]),
-    makeShortTag(259, [1]), // Uncompressed
-    makeShortTag(262, [34892]), // Photometric = LinearRaw
-    makeLongTag(273, [raw16StripOffset]),
-    makeShortTag(277, [3]),
-    makeLongTag(278, [fullH]),
-    makeLongTag(279, [raw16ByteCount]),
-    makeRationalTag(282, [[72, 1]]),
-    makeRationalTag(283, [[72, 1]]),
-    makeShortTag(284, [1]),
-    makeShortTag(296, [2]),
-    makeLongTag(50714, [0, 0, 0]), // BlackLevel
-    makeLongTag(50717, [65535, 65535, 65535]), // WhiteLevel
-  ];
-
-  writeIfdBlock(view, 8, ifd0Entries, 0);
-  writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
-  writeIfdBlock(view, subIfdOffset, subIfdEntries, 0);
-
-  // Write IFD0 8-bit preview pixels
   u8.set(prevRgb8, prevStripOffset);
-
-  // Write SubIFD0 16-bit Linear RGB pixels
-  const dst16 = new Uint16Array(buffer, raw16StripOffset, healedLinear16.length);
-  dst16.set(healedLinear16);
+  new Uint16Array(buffer, rawStripOffset, healedLinear16.length).set(healedLinear16);
 
   return buffer;
 }
 
 /**
- * Builds a standard 16-bit uncompressed RGB TIFF binary ArrayBuffer (.tiff)
- * with complete ExifIFD (Tag 34665), ICCProfile (Tag 34675), and XMP (Tag 700) embedded.
+ * Builds a 16-bit uncompressed RGB TIFF binary ArrayBuffer (.tiff) with ExifIFD (34665),
+ * ICCProfile (34675) and XMP (700). Block offsets are computed from the actual tag sizes.
  */
 export function writeTiff16Buffer(
   healedRgb8: Uint8Array,
@@ -808,10 +854,48 @@ export function writeTiff16Buffer(
 
   const iccBytes = customIccProfile || buildIccProfileBytes(effectiveSpace);
 
-  const exifIfdOffset = 2048;
-  const headerReserve = 32768;
-  const stripOffset = headerReserve;
+  const makeStr = meta.exif?.make || 'Camera';
+  const modelStr = meta.exif?.model || 'Sensor';
+  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
+
+  const buildEntries = (exifIfdOffset: number, stripOffset: number) => {
+    const ifd0: TiffTagEntry[] = [
+      makeLongTag(254, [0]),
+      makeLongTag(256, [fullW]),
+      makeLongTag(257, [fullH]),
+      makeShortTag(258, [16, 16, 16]),
+      makeShortTag(259, [1]), // Uncompressed
+      makeShortTag(262, [2]), // Photometric = 2 (RGB)
+      makeAsciiTag(271, makeStr),
+      makeAsciiTag(272, modelStr),
+      makeAsciiTag(305, meta.exif?.software || 'SensorClean'),
+      makeAsciiTag(306, dateStr),
+      makeLongTag(273, [stripOffset]),
+      makeShortTag(274, [1]),
+      makeShortTag(277, [3]),
+      makeLongTag(278, [fullH]),
+      makeLongTag(279, [raw16ByteCount]),
+      makeRationalTag(282, [[72, 1]]),
+      makeRationalTag(283, [[72, 1]]),
+      makeShortTag(284, [1]),
+      makeShortTag(296, [2]),
+      makeLongTag(34665, [exifIfdOffset]), // ExifIFD pointer
+      makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
+    ];
+    if (meta.exif?.artist) ifd0.push(makeAsciiTag(315, meta.exif.artist));
+    if (meta.exif?.copyright) ifd0.push(makeAsciiTag(33432, meta.exif.copyright));
+    if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
+      ifd0.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
+    }
+    return { ifd0, exif: buildExifIfdEntries(meta) };
+  };
+
+  const sizing = buildEntries(0, 0);
+  const ifd0Offset = 8;
+  const exifIfdOffset = alignUp(ifd0Offset + measureIfdBlock(sizing.ifd0), 2);
+  const stripOffset = alignUp(exifIfdOffset + measureIfdBlock(sizing.exif), 16);
   const totalBufferSize = stripOffset + raw16ByteCount;
+  assertTiffFits(totalBufferSize, 'TIFF');
 
   const buffer = new ArrayBuffer(totalBufferSize);
   const view = new DataView(buffer);
@@ -820,46 +904,11 @@ export function writeTiff16Buffer(
   u8[0] = 0x49;
   u8[1] = 0x49;
   view.setUint16(2, 42, true);
-  view.setUint32(4, 8, true);
+  view.setUint32(4, ifd0Offset, true);
 
-  const makeStr = meta.exif?.make || 'Camera';
-  const modelStr = meta.exif?.model || 'Sensor';
-  const dateStr = meta.exif?.dateTime || new Date().toISOString().replace(/T/, ' ').slice(0, 19);
-
-  const entries: TiffTagEntry[] = [
-    makeLongTag(254, [0]),
-    makeLongTag(256, [fullW]),
-    makeLongTag(257, [fullH]),
-    makeShortTag(258, [16, 16, 16]),
-    makeShortTag(259, [1]), // Uncompressed
-    makeShortTag(262, [2]), // Photometric = 2 (RGB)
-    makeAsciiTag(271, makeStr),
-    makeAsciiTag(272, modelStr),
-    makeAsciiTag(305, meta.exif?.software || 'SensorClean Pro Wide-Gamut 16-bit TIFF Engine'),
-    makeAsciiTag(306, dateStr),
-    makeLongTag(273, [stripOffset]),
-    makeShortTag(274, [1]),
-    makeShortTag(277, [3]),
-    makeLongTag(278, [fullH]),
-    makeLongTag(279, [raw16ByteCount]),
-    makeRationalTag(282, [[72, 1]]),
-    makeRationalTag(283, [[72, 1]]),
-    makeShortTag(284, [1]),
-    makeShortTag(296, [2]),
-    makeLongTag(34665, [exifIfdOffset]), // ExifIFD pointer
-    makeUndefinedTag(34675, iccBytes), // Tag 34675 ICCProfile
-  ];
-
-  if (meta.exif?.artist) entries.push(makeAsciiTag(315, meta.exif.artist));
-  if (meta.exif?.copyright) entries.push(makeAsciiTag(33432, meta.exif.copyright));
-  if (meta.exif?.rawXmpBytes && meta.exif.rawXmpBytes.length > 0) {
-    entries.push(makeUndefinedTag(700, meta.exif.rawXmpBytes));
-  }
-
-  const exifIfdEntries = buildExifIfdEntries(meta);
-
-  writeIfdBlock(view, 8, entries, 0);
-  writeIfdBlock(view, exifIfdOffset, exifIfdEntries, 0);
+  const entries = buildEntries(exifIfdOffset, stripOffset);
+  writeIfdBlock(view, ifd0Offset, entries.ifd0, 0);
+  writeIfdBlock(view, exifIfdOffset, entries.exif, 0);
 
   // Write true 16-bit lossless samples from healedLinear16 (preserving 100% of 16-bit DR)
   const dst16 = new Uint16Array(buffer, stripOffset, numSamples);
@@ -867,7 +916,7 @@ export function writeTiff16Buffer(
     // Already in perceptual 16-bit space (e.g. 16-bit TIFF input) -> copy 1:1 with zero transformation
     dst16.set(healedLinear16);
   } else {
-    // Convert 16-bit linear (0..65535) to 16-bit sRGB/AdobeRGB gamma (0..65535) with unclipped full dynamic range
+    // Convert 16-bit linear (0..65535) to 16-bit sRGB gamma (0..65535) with unclipped full dynamic range
     const linToGamma16 = new Uint16Array(65536);
     for (let v = 0; v < 65536; v++) {
       const norm = v / 65535.0;

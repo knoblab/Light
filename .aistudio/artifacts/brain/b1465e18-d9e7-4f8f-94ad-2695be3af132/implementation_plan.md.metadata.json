@@ -1,6 +1,0 @@
-{
-  "summary": "Implementation plan for separating the crowded bottom toolbar into a Left Vertical Toolbar (Pens, Hand Pan Tool, Pen Size, Undo/Redo) and a compact Bottom Bar (View Modes, Overlay, Zoom) without horizontal scroll, plus adding full vertical/horizontal panning when zoomed in via Mouse Wheel, Spacebar + Drag, and a dedicated Hand (Pan) tool.",
-  "updatedAt": "2026-11-04T12:03:44.291911542Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

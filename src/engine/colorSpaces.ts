@@ -463,8 +463,9 @@ export function buildIccProfileBytes(colorSpaceId: Exclude<ColorSpaceId, 'auto'>
   //    - rXYZ, gXYZ, bXYZ (type 'XYZ ', 20 bytes each)
   //    - rTRC, gTRC, bTRC (type 'curv', 4 + 4 + 4 + (samples or gamma) bytes)
 
-  // Buffer calculation
-  const totalSize = 1024;
+  // Buffer calculation: fixed tags fit in 2 KB; sampled curves (sRGB / Display P3) add 3 x (12 + 1024 * 2) bytes + padding
+  const SAMPLED_CURVE_BYTES = 12 + 1024 * 2;
+  const totalSize = 2048 + (def.gamma > 0 ? 0 : 3 * (SAMPLED_CURVE_BYTES + 4));
   const buf = new ArrayBuffer(totalSize);
   const view = new DataView(buf);
   const u8 = new Uint8Array(buf);

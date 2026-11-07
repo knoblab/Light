@@ -11,6 +11,7 @@ import {
   SessionMetadata,
 } from '../types/sensor';
 import { decodeImageFileLocal } from '../engine/tiffRawDecoder';
+import { DNG_DISABLED_REASON, isDngExportAllowed } from '../engine/exportPolicy';
 import {
   computeDetGrayFromRgb8,
   detectSensorDustLocal,
@@ -50,6 +51,12 @@ interface WorkerSessionData {
 }
 
 const sessions = new Map<string, WorkerSessionData>();
+
+function assertExportFormatAllowed(session: WorkerSessionData, format: string) {
+  if (format.toLowerCase() === 'dng' && !isDngExportAllowed(session.meta)) {
+    throw new Error(`${session.meta.originalFileName}: ${DNG_DISABLED_REASON}`);
+  }
+}
 
 function sendDetailedProgress(
   reqId: number,
@@ -155,6 +162,7 @@ async function processSingleIngestAndDetect(
     originalFileName: fileName,
     extension: decoded.extension,
     isRaw: decoded.isRaw,
+    decodeKind: decoded.decodeKind,
     isLinear16: decoded.isLinear16 ?? true,
     fullWidth: fullW,
     fullHeight: fullH,
@@ -162,7 +170,12 @@ async function processSingleIngestAndDetect(
     workHeight: workH,
     workScale,
     exposureScale: decoded.exposureScale,
-    bitDepth: '16-bit Linear + 1:1 Original Camera Profile',
+    bitDepth:
+      decoded.decodeKind === 'embedded-preview'
+        ? '8-bit 내장 미리보기 (센서 데이터 아님)'
+        : decoded.decodeKind === 'image-8bit'
+        ? '8-bit 이미지'
+        : '16-bit',
     colorSpace: colorSpaceName,
     detectedColorSpace: decoded.detectedColorSpace,
     hasEmbeddedIcc: Boolean(decoded.rawIccProfileBytes),
@@ -447,9 +460,10 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 5, '1:1 원본 해상도 무손실 내보내기 준비');
+      sendProgress(id, 5, '원본 해상도 내보내기 준비');
       const session = sessions.get(sessionId);
       if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+      assertExportFormatAllowed(session, format);
 
       const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
       sendProgress(id, 15, '임시 저장본 확인 및 1:1 버퍼 검증 중');
@@ -477,7 +491,7 @@ self.onmessage = async (event: MessageEvent) => {
       session.healedLinear16 = healedLinear16;
       session.checkpoint = checkpoint;
 
-      sendProgress(id, 70, `${format.toUpperCase()} 파일 포맷 무손실 인코딩 중`);
+      sendProgress(id, 70, `${format.toUpperCase()} 파일 인코딩 중`);
       const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
         renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
         encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
@@ -637,6 +651,10 @@ self.onmessage = async (event: MessageEvent) => {
 
       const zipEntries: Array<{ name: string; data: Uint8Array }> = [];
       const total = items.length;
+      for (const it of items) {
+        const sess = sessions.get(it.sessionId);
+        if (sess) assertExportFormatAllowed(sess, format);
+      }
       for (let i = 0; i < total; i++) {
         const it = items[i];
         const sess = sessions.get(it.sessionId);

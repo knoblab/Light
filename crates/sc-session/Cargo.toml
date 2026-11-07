@@ -1,0 +1,24 @@
+[package]
+name = "sc-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean session store (memmap2 NPY storage, TTL/owner isolation, native heal/export & Python oracle bridge)"
+
+[dependencies]
+image = { workspace = true }
+jpeg-encoder = { workspace = true }
+lightcraft-tiff = { workspace = true }
+memmap2 = { workspace = true }
+png = { workspace = true }
+rayon = { workspace = true }
+sc-color = { path = "../sc-color" }
+sc-core = { path = "../sc-core" }
+sc-decode = { path = "../sc-decode" }
+sc-detect = { path = "../sc-detect" }
+sc-imgproc = { path = "../sc-imgproc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

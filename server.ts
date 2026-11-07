@@ -11,10 +11,19 @@ import { createServer as createViteServer } from 'vite';
 
 const execFileAsync = promisify(execFile);
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '127.0.0.1';
+const IS_PRODUCTION =
+  process.env.NODE_ENV === 'production' || process.argv.includes('--production');
+const IS_WINDOWS = process.platform === 'win32';
 const WORKSPACE_ROOT = process.cwd();
 const SESSIONS_ROOT = path.join(os.tmpdir(), 'sensorclean_sessions');
 const UPLOADS_ROOT = path.join(os.tmpdir(), 'sensorclean_uploads');
+
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const TEMP_FILE_TTL_MS = 30 * 60 * 1000;
+const CLIENT_COOKIE = 'sc_client';
+const OWNER_FILE = '.owner';
 
 fs.mkdirSync(SESSIONS_ROOT, { recursive: true });
 fs.mkdirSync(UPLOADS_ROOT, { recursive: true });
@@ -34,116 +43,125 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
+  defParamCharset: 'utf8',
   limits: {
     fileSize: 200 * 1024 * 1024, // 200MB max for high-resolution RW2/DNG files
   },
 });
 
-let pythonEnvBootstrapPromise: Promise<string> | null = null;
-
-function getExistingPythonBinary(): string | null {
-  const localVenvPy = path.join(WORKSPACE_ROOT, '.venv', 'bin', 'python');
-  if (fs.existsSync(localVenvPy)) {
-    return localVenvPy;
-  }
-  const tmpVenvPy = '/tmp/venv/bin/python';
-  if (fs.existsSync(tmpVenvPy)) {
-    return tmpVenvPy;
-  }
-  return null;
-}
-
-async function ensurePythonEnvironment(): Promise<string> {
-  const existing = getExistingPythonBinary();
-  if (existing) {
-    return existing;
-  }
-
-  if (pythonEnvBootstrapPromise) {
-    return pythonEnvBootstrapPromise;
-  }
-
-  pythonEnvBootstrapPromise = (async () => {
-    try {
-      const targetVenv = path.join(WORKSPACE_ROOT, '.venv');
-      const targetPy = path.join(targetVenv, 'bin', 'python');
-      const targetPip = path.join(targetVenv, 'bin', 'pip');
-      console.log('Bootstrapping Python 16-bit environment in', targetVenv);
-
-      await execFileAsync(
-        'bash',
-        [
-          '-c',
-          `python3 -m venv --without-pip "${targetVenv}" && curl -sS https://bootstrap.pypa.io/get-pip.py | "${targetPy}" && "${targetPip}" install --no-cache-dir numpy opencv-python-headless rawpy tifffile piexif`,
-        ],
-        { maxBuffer: 50 * 1024 * 1024, timeout: 240000 }
-      );
-
-      if (fs.existsSync(targetPy)) {
-        return targetPy;
-      }
-      return 'python3';
-    } catch (err) {
-      console.error('Failed to auto-bootstrap Python venv:', err);
-      return 'python3';
-    } finally {
-      pythonEnvBootstrapPromise = null;
-    }
-  })();
-
-  return pythonEnvBootstrapPromise;
+function getVenvPython(): string | null {
+  const venvPython = path.join(
+    WORKSPACE_ROOT,
+    '.venv',
+    IS_WINDOWS ? 'Scripts' : 'bin',
+    IS_WINDOWS ? 'python.exe' : 'python'
+  );
+  return fs.existsSync(venvPython) ? venvPython : null;
 }
 
 function getPythonBinary(): string {
-  return getExistingPythonBinary() || 'python3';
+  return process.env.SENSORCLEAN_PYTHON || getVenvPython() || (IS_WINDOWS ? 'python' : 'python3');
 }
 
-function pruneOldSessions(keepMax: number = 2, protectSessionIds: string[] = []): void {
+// Force UTF-8 so non-ASCII file names survive the stdin/argv hop on Windows locales (e.g. cp949)
+const PYTHON_ENV = { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+
+const PYTHON_SETUP_HINT = 'Python 엔진이 준비되지 않았습니다. `npm run setup:python`을 실행해 주세요.';
+
+function readSessionOwner(sessionDir: string): string | null {
   try {
-    // 1. Clean up stale files in UPLOADS_ROOT older than 5 minutes
-    if (fs.existsSync(UPLOADS_ROOT)) {
-      const now = Date.now();
-      for (const name of fs.readdirSync(UPLOADS_ROOT)) {
-        const fullPath = path.join(UPLOADS_ROOT, name);
-        try {
-          const st = fs.statSync(fullPath);
-          if (now - st.mtimeMs > 5 * 60 * 1000) {
-            fs.rmSync(fullPath, { recursive: true, force: true });
-          }
-        } catch {}
-      }
+    return fs.readFileSync(path.join(sessionDir, OWNER_FILE), 'utf-8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function removePath(target: string): void {
+  try {
+    fs.rmSync(target, { recursive: true, force: true });
+  } catch {}
+}
+
+/**
+ * Removes expired sessions and temp files. When `clientId` is given, also trims that client's own
+ * older sessions down to `keepForClient`; other clients' sessions are never touched.
+ */
+function pruneSessions(
+  options: { clientId?: string; keepForClient?: number; protectSessionIds?: string[] } = {}
+): void {
+  const { clientId, keepForClient = 0, protectSessionIds = [] } = options;
+  const now = Date.now();
+  try {
+    for (const name of fs.readdirSync(UPLOADS_ROOT)) {
+      const fullPath = path.join(UPLOADS_ROOT, name);
+      try {
+        if (now - fs.statSync(fullPath).mtimeMs > TEMP_FILE_TTL_MS) removePath(fullPath);
+      } catch {}
     }
 
-    // 2. Prune older session directories and old batch zip files in SESSIONS_ROOT to prevent /tmp tmpfs RAM exhaustion
-    if (!fs.existsSync(SESSIONS_ROOT)) return;
     const protectSet = new Set(protectSessionIds);
-    const entries = fs.readdirSync(SESSIONS_ROOT);
-    const dirs: { name: string; fullPath: string; mtimeMs: number }[] = [];
-
-    for (const name of entries) {
-      if (protectSet.has(name)) continue;
+    const ownDirs: { fullPath: string; mtimeMs: number }[] = [];
+    for (const name of fs.readdirSync(SESSIONS_ROOT)) {
       const fullPath = path.join(SESSIONS_ROOT, name);
       try {
         const st = fs.statSync(fullPath);
         if (st.isDirectory() && name.startsWith('sc_')) {
-          dirs.push({ name, fullPath, mtimeMs: st.mtimeMs });
-        } else if (st.isFile() && (name.endsWith('.zip') || name.startsWith('multi_cfg_'))) {
-          if (Date.now() - st.mtimeMs > 5 * 60 * 1000) {
-            fs.rmSync(fullPath, { force: true });
+          if (protectSet.has(name)) continue;
+          if (now - st.mtimeMs > SESSION_TTL_MS) {
+            removePath(fullPath);
+          } else if (clientId && readSessionOwner(fullPath) === clientId) {
+            ownDirs.push({ fullPath, mtimeMs: st.mtimeMs });
           }
+        } else if (st.isFile() && (name.endsWith('.zip') || name.startsWith('multi_cfg_'))) {
+          if (now - st.mtimeMs > TEMP_FILE_TTL_MS) removePath(fullPath);
         }
       } catch {}
     }
 
-    dirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    for (let i = keepMax; i < dirs.length; i++) {
-      try {
-        fs.rmSync(dirs[i].fullPath, { recursive: true, force: true });
-      } catch {}
-    }
+    ownDirs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (let i = keepForClient; i < ownDirs.length; i++) removePath(ownDirs[i].fullPath);
   } catch (err) {
-    console.warn('pruneOldSessions warning:', err);
+    console.warn('pruneSessions warning:', err);
   }
+}
+
+function parseCookies(header: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of (header || '').split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) out[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+  }
+  return out;
+}
+
+function getClientId(res: express.Response): string {
+  return String(res.locals.clientId);
+}
+
+/**
+ * Resolves a session directory for the calling client. Returns null if the session does not exist
+ * or belongs to another client. Touching the directory keeps active sessions alive past the TTL.
+ */
+function resolveSessionDir(res: express.Response, rawSessionId: unknown): string | null {
+  const safeSession = String(rawSessionId ?? '').replace(/[^a-zA-Z0-9_-]/g, '');
+  if (!safeSession.startsWith('sc_')) return null;
+  const sessionDir = path.join(SESSIONS_ROOT, safeSession);
+  if (!fs.existsSync(sessionDir)) return null;
+  const owner = readSessionOwner(sessionDir);
+  if (owner && owner !== getClientId(res)) return null;
+  try {
+    const nowDate = new Date();
+    fs.utimesSync(sessionDir, nowDate, nowDate);
+  } catch {}
+  return sessionDir;
+}
+
+function createSessionDir(res: express.Response): { sessionId: string; sessionDir: string } {
+  const sessionId = `sc_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const sessionDir = path.join(SESSIONS_ROOT, sessionId);
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(path.join(sessionDir, OWNER_FILE), getClientId(res));
+  return { sessionId, sessionDir };
 }
 
 let activeWorker: ChildProcessWithoutNullStreams | null = null;
@@ -153,16 +171,30 @@ let workerPending = new Map<
 >();
 let workerSeq = 0;
 
-async function ensurePythonWorker(): Promise<ChildProcessWithoutNullStreams> {
-  if (activeWorker && !activeWorker.killed && activeWorker.exitCode === null) {
-    return activeWorker;
-  }
-
-  const pyBin = await ensurePythonEnvironment();
+async function startPythonWorker(): Promise<ChildProcessWithoutNullStreams> {
+  const pyBin = getPythonBinary();
   const scriptPath = path.join(WORKSPACE_ROOT, 'python', 'raw_pipeline.py');
   const child = spawn(pyBin, ['-u', scriptPath, '--worker'], {
     cwd: WORKSPACE_ROOT,
     stdio: ['pipe', 'pipe', 'pipe'],
+    env: PYTHON_ENV,
+  });
+
+  child.stderr.on('data', (chunk) => {
+    const text = String(chunk).trim();
+    if (text) console.error('[python]', text);
+  });
+
+  child.on('error', (err) => {
+    console.error(`Python 작업 프로세스를 시작할 수 없습니다 (${pyBin}): ${err.message}`);
+    if (activeWorker === child) {
+      activeWorker = null;
+    }
+    for (const [, entry] of workerPending) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error(PYTHON_SETUP_HINT));
+    }
+    workerPending.clear();
   });
 
   const rl = readline.createInterface({ input: child.stdout });
@@ -198,17 +230,47 @@ async function ensurePythonWorker(): Promise<ChildProcessWithoutNullStreams> {
     workerPending.clear();
   });
 
+  // spawn() reports a missing interpreter asynchronously; only hand out workers that really started
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', () => resolve());
+    child.once('error', reject);
+  });
+
   activeWorker = child;
   return child;
 }
 
+let workerStarting: Promise<ChildProcessWithoutNullStreams> | null = null;
+
+function ensurePythonWorker(): Promise<ChildProcessWithoutNullStreams> {
+  if (activeWorker && !activeWorker.killed && activeWorker.exitCode === null) {
+    return Promise.resolve(activeWorker);
+  }
+  if (!workerStarting) {
+    workerStarting = startPythonWorker().finally(() => {
+      workerStarting = null;
+    });
+  }
+  return workerStarting;
+}
+
 async function runPythonPipelineFallback(args: string[]): Promise<any> {
-  const pyBin = await ensurePythonEnvironment();
+  const pyBin = getPythonBinary();
   const scriptPath = path.join(WORKSPACE_ROOT, 'python', 'raw_pipeline.py');
-  const { stdout, stderr } = await execFileAsync(pyBin, [scriptPath, ...args], {
-    maxBuffer: 50 * 1024 * 1024,
-    timeout: 300000,
-  });
+  let stdout: string;
+  let stderr: string;
+  try {
+    ({ stdout, stderr } = await execFileAsync(pyBin, [scriptPath, ...args], {
+      maxBuffer: 50 * 1024 * 1024,
+      timeout: 300000,
+      env: PYTHON_ENV,
+    }));
+  } catch (err: any) {
+    if (err?.code === 'ENOENT' || /ModuleNotFoundError|No module named/.test(String(err?.stderr || ''))) {
+      throw new Error(PYTHON_SETUP_HINT);
+    }
+    throw err;
+  }
 
   const lines = stdout.trim().split('\n');
   const lastLine = lines[lines.length - 1];
@@ -226,43 +288,106 @@ async function runPythonPipelineFallback(args: string[]): Promise<any> {
 }
 
 async function runPythonPipeline(args: string[]): Promise<any> {
+  let worker: ChildProcessWithoutNullStreams;
   try {
-    const worker = await ensurePythonWorker();
-    const reqId = `req_${++workerSeq}_${Date.now()}`;
-    return await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        workerPending.delete(reqId);
-        try {
-          worker.kill();
-        } catch {}
-        reject(new Error('Python worker request timed out'));
-      }, 240000);
-
-      workerPending.set(reqId, { resolve, reject, timer });
-      worker.stdin.write(JSON.stringify({ id: reqId, args }) + '\n', (err) => {
-        if (err) {
-          clearTimeout(timer);
-          workerPending.delete(reqId);
-          reject(err);
-        }
-      });
-    });
+    worker = await ensurePythonWorker();
   } catch {
     return runPythonPipelineFallback(args);
   }
+
+  const reqId = `req_${++workerSeq}_${Date.now()}`;
+  return new Promise<any>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      workerPending.delete(reqId);
+      try {
+        worker.kill();
+      } catch {}
+      reject(new Error('Python worker request timed out'));
+    }, 240000);
+
+    workerPending.set(reqId, { resolve, reject, timer });
+    worker.stdin.write(JSON.stringify({ id: reqId, args }) + '\n', (err) => {
+      if (err) {
+        clearTimeout(timer);
+        workerPending.delete(reqId);
+        reject(err);
+      }
+    });
+  });
+}
+
+const EXPORT_FORMATS: Record<string, { ext: string; suffix: string }> = {
+  dng: { ext: 'dng', suffix: '_cleaned_linear16' },
+  tiff16: { ext: 'tiff', suffix: '_cleaned_16bit' },
+  png: { ext: 'png', suffix: '_cleaned_srgb' },
+  jpg: { ext: 'jpg', suffix: '_cleaned_srgb' },
+};
+
+function batchZipPrefix(res: express.Response): string {
+  return `${getClientId(res).slice(0, 12)}_`;
+}
+
+function toSafeStem(originalFileName: unknown, fallback: string): string {
+  const name = String(originalFileName || '');
+  const stem = path
+    .basename(name, path.extname(name))
+    .replace(/[^\p{L}\p{N}._-]/gu, '_')
+    .replace(/^[_.]+|[_.]+$/g, '');
+  return stem || fallback;
+}
+
+function readSessionMeta(sessionDir: string): Record<string, any> {
+  const metaPath = path.join(sessionDir, 'session_meta.json');
+  try {
+    return JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+/** Returns an error message when the requested export format is not valid for this session. */
+function validateExportFormat(fmtKey: string, meta: Record<string, any>): string | null {
+  if (!EXPORT_FORMATS[fmtKey]) {
+    return `지원하지 않는 내보내기 형식입니다: ${fmtKey}`;
+  }
+  if (fmtKey === 'dng') {
+    const hasRawData =
+      meta.decodeKind === 'raw-developed' || (meta.decodeKind === undefined && meta.isRaw !== false);
+    if (!hasRawData) {
+      return 'RAW 센서 데이터가 아닌 이미지는 DNG로 내보낼 수 없습니다. TIFF 또는 PNG를 사용해 주세요.';
+    }
+  }
+  return null;
 }
 
 async function startServer() {
+  pruneSessions();
+  setInterval(() => pruneSessions(), 10 * 60 * 1000).unref();
+
   // Pre-warm the persistent Python 16-bit engine in the background
   ensurePythonWorker().catch(() => {});
   const app = express();
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+  // Anonymous per-browser identity: sessions are only reachable by the client that created them.
+  app.use((req, res, next) => {
+    let clientId = parseCookies(req.headers.cookie)[CLIENT_COOKIE];
+    if (!clientId || !/^[a-f0-9]{32}$/.test(clientId)) {
+      clientId = crypto.randomBytes(16).toString('hex');
+      res.setHeader(
+        'Set-Cookie',
+        `${CLIENT_COOKIE}=${clientId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 365}`
+      );
+    }
+    res.locals.clientId = clientId;
+    next();
+  });
+
   // 1. Check Python 16-bit Engine Status
   app.get('/api/engine-status', async (_req, res) => {
+    const pyBin = getPythonBinary();
     try {
-      const pyBin = await ensurePythonEnvironment();
       const { stdout } = await execFileAsync(pyBin, [
         '-c',
         'import json, cv2, numpy, rawpy, tifffile, piexif; print(json.dumps({"opencv": cv2.__version__, "numpy": numpy.__version__, "rawpy": rawpy.__version__, "tifffile": tifffile.__version__}))',
@@ -276,19 +401,24 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({
         ready: false,
-        error: err.message,
+        pythonBinary: pyBin,
+        error: PYTHON_SETUP_HINT,
+        detail: err.message,
       });
     }
   });
 
   // 2. Serve session preview images (original sRGB preview, B&W edge mask, healed preview)
   app.get('/api/session/:sessionId/file/:fileName', (req, res) => {
-    const { sessionId, fileName } = req.params;
-    const safeSession = sessionId.replace(/[^a-zA-Z0-9_-]/g, '');
-    const safeFile = path.basename(fileName);
-    const filePath = path.join(SESSIONS_ROOT, safeSession, safeFile);
+    const sessionDir = resolveSessionDir(res, req.params.sessionId);
+    if (!sessionDir) {
+      res.status(404).json({ error: 'File not found' });
+      return;
+    }
+    const safeFile = path.basename(req.params.fileName);
+    const filePath = path.join(sessionDir, safeFile);
 
-    if (!fs.existsSync(filePath)) {
+    if (safeFile === OWNER_FILE || !fs.existsSync(filePath)) {
       res.status(404).json({ error: 'File not found' });
       return;
     }
@@ -313,12 +443,10 @@ async function startServer() {
           return;
         }
 
-        // Free old sessions in /tmp before ingesting a new 16-bit RAW array
-        pruneOldSessions(1);
+        // Trim only this client's older sessions (expired sessions of anyone are removed as well)
+        pruneSessions({ clientId: getClientId(res), keepForClient: 2 });
 
-        const sessionId = `sc_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-        const sessionDir = path.join(SESSIONS_ROOT, sessionId);
-        fs.mkdirSync(sessionDir, { recursive: true });
+        const { sessionId, sessionDir } = createSessionDir(res);
 
         // Preserve original filename inside session directory
         const ext = path.extname(req.file.originalname) || '.rw2';
@@ -370,12 +498,12 @@ async function startServer() {
         res.status(400).json({ error: 'sessionId가 필요합니다.' });
         return;
       }
-      const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
-      const sessionDir = path.join(SESSIONS_ROOT, safeSession);
-      if (!fs.existsSync(sessionDir)) {
+      const sessionDir = resolveSessionDir(res, sessionId);
+      if (!sessionDir) {
         res.status(404).json({ error: '세션을 찾을 수 없습니다. 파일을 다시 업로드해주세요.' });
         return;
       }
+      const safeSession = path.basename(sessionDir);
 
       const detection = await runPythonPipeline([
         'detect',
@@ -407,12 +535,12 @@ async function startServer() {
         res.status(400).json({ error: 'sessionId가 필요합니다.' });
         return;
       }
-      const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
-      const sessionDir = path.join(SESSIONS_ROOT, safeSession);
-      if (!fs.existsSync(sessionDir)) {
+      const sessionDir = resolveSessionDir(res, sessionId);
+      if (!sessionDir) {
         res.status(404).json({ error: '세션을 찾을 수 없습니다.' });
         return;
       }
+      const safeSession = path.basename(sessionDir);
 
       const paramsFile = path.join(sessionDir, 'inpaint_params.json');
       fs.writeFileSync(
@@ -465,39 +593,25 @@ async function startServer() {
         return;
       }
 
-      const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
-      const sessionDir = path.join(SESSIONS_ROOT, safeSession);
-      if (!fs.existsSync(sessionDir)) {
+      const sessionDir = resolveSessionDir(res, sessionId);
+      if (!sessionDir) {
         res.status(404).json({
           error: '세션을 찾을 수 없습니다. 사진을 다시 불러와 주세요.',
         });
         return;
       }
+      const safeSession = path.basename(sessionDir);
 
-      const metaPath = path.join(sessionDir, 'session_meta.json');
-      const meta = fs.existsSync(metaPath)
-        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
-        : { originalFileName: 'sensor_cleaned.rw2' };
-
-      const rawStem = path
-        .basename(
-          meta.originalFileName || 'sensor_cleaned',
-          path.extname(meta.originalFileName || '')
-        )
-        .replace(/[^a-zA-Z0-9._-]/g, '_')
-        .replace(/^_+|_+$/g, '');
-      const baseStem = rawStem || 'sensor_cleaned';
-
+      const meta = readSessionMeta(sessionDir);
       const fmtKey = String(format || 'dng').toLowerCase();
-      const fmtMap: Record<string, { ext: string; suffix: string }> = {
-        dng: { ext: 'dng', suffix: '_cleaned_linear16' },
-        tiff16: { ext: 'tiff', suffix: '_cleaned_16bit' },
-        png: { ext: 'png', suffix: '_cleaned_srgb' },
-        jpg: { ext: 'jpg', suffix: '_cleaned_srgb' },
-      };
+      const formatError = validateExportFormat(fmtKey, meta);
+      if (formatError) {
+        res.status(400).json({ error: formatError });
+        return;
+      }
 
-      const target = fmtMap[fmtKey] || fmtMap.dng;
-      const downloadName = `${baseStem}${target.suffix}.${target.ext}`;
+      const target = EXPORT_FORMATS[fmtKey];
+      const downloadName = `${toSafeStem(meta.originalFileName, 'sensor_cleaned')}${target.suffix}.${target.ext}`;
       const outputPath = path.join(sessionDir, downloadName);
 
       const paramsFile = path.join(sessionDir, 'inpaint_params.json');
@@ -557,16 +671,19 @@ async function startServer() {
     try {
       const { sessionId, fileName } = req.params;
       const safeFile = path.basename(fileName);
-      const filePath =
-        sessionId === '__batch__'
-          ? path.join(SESSIONS_ROOT, safeFile)
-          : path.join(
-              SESSIONS_ROOT,
-              String(sessionId).replace(/[^a-zA-Z0-9_-]/g, ''),
-              safeFile
-            );
+      let filePath: string | null = null;
+      if (sessionId === '__batch__') {
+        if (safeFile.startsWith(batchZipPrefix(res)) && safeFile.endsWith('.zip')) {
+          filePath = path.join(SESSIONS_ROOT, safeFile);
+        }
+      } else {
+        const sessionDir = resolveSessionDir(res, sessionId);
+        if (sessionDir && safeFile !== OWNER_FILE) {
+          filePath = path.join(sessionDir, safeFile);
+        }
+      }
 
-      if (!fs.existsSync(filePath)) {
+      if (!filePath || !fs.existsSync(filePath)) {
         res.status(404).json({ error: '내보낼 파일을 찾을 수 없습니다.' });
         return;
       }
@@ -609,44 +726,25 @@ async function startServer() {
   app.get('/api/export/:sessionId/:format', async (req, res) => {
     try {
       const { sessionId, format } = req.params;
-      const safeSession = String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
-      const sessionDir = path.join(SESSIONS_ROOT, safeSession);
-      if (!fs.existsSync(sessionDir)) {
+      const sessionDir = resolveSessionDir(res, sessionId);
+      if (!sessionDir) {
         res.status(404).json({ error: '세션을 찾을 수 없습니다.' });
         return;
       }
 
-      const metaPath = path.join(sessionDir, 'session_meta.json');
-      const meta = fs.existsSync(metaPath)
-        ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
-        : { originalFileName: 'sensor_cleaned.rw2' };
+      const meta = readSessionMeta(sessionDir);
+      const fmtKey = format.toLowerCase();
+      const formatError = validateExportFormat(fmtKey, meta);
+      if (formatError) {
+        res.status(400).json({ error: formatError });
+        return;
+      }
 
-      const rawStem = path
-        .basename(
-          meta.originalFileName || 'sensor_cleaned',
-          path.extname(meta.originalFileName || '')
-        )
-        .replace(/[^a-zA-Z0-9._-]/g, '_')
-        .replace(/^_+|_+$/g, '');
-      const baseStem = rawStem || 'sensor_cleaned';
-
-      const fmtMap: Record<string, { ext: string; suffix: string }> = {
-        dng: { ext: 'dng', suffix: '_cleaned_linear16' },
-        tiff16: { ext: 'tiff', suffix: '_cleaned_16bit' },
-        png: { ext: 'png', suffix: '_cleaned_srgb' },
-        jpg: { ext: 'jpg', suffix: '_cleaned_srgb' },
-      };
-
-      const target = fmtMap[format.toLowerCase()] || fmtMap.dng;
-      const downloadName = `${baseStem}${target.suffix}.${target.ext}`;
+      const target = EXPORT_FORMATS[fmtKey];
+      const downloadName = `${toSafeStem(meta.originalFileName, 'sensor_cleaned')}${target.suffix}.${target.ext}`;
       const outputPath = path.join(sessionDir, downloadName);
 
-      const exportInfo = await runPythonPipeline([
-        'export',
-        sessionDir,
-        format.toLowerCase(),
-        outputPath,
-      ]);
+      const exportInfo = await runPythonPipeline(['export', sessionDir, fmtKey, outputPath]);
 
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-File-Name');
       res.setHeader('X-File-Name', encodeURIComponent(downloadName));
@@ -683,14 +781,13 @@ async function startServer() {
       }
 
       try {
-        pruneOldSessions(0);
+        // A new sequence replaces this client's previous sessions only
+        pruneSessions({ clientId: getClientId(res), keepForClient: 0 });
         const sessionDirs: string[] = [];
         const sessionList: any[] = [];
 
         for (const file of files) {
-          const sessionId = `sc_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-          const sessionDir = path.join(SESSIONS_ROOT, sessionId);
-          fs.mkdirSync(sessionDir, { recursive: true });
+          const { sessionId, sessionDir } = createSessionDir(res);
 
           const inputFilePath = path.join(
             sessionDir,
@@ -783,8 +880,11 @@ async function startServer() {
       }
 
       const sessionDirs = sessionIds
-        .map((sid: string) => path.join(SESSIONS_ROOT, String(sid).replace(/[^a-zA-Z0-9_-]/g, '')))
-        .filter((d: string) => fs.existsSync(d));
+        .map((sid: string) => resolveSessionDir(res, sid))
+        .filter((d: string | null): d is string => d !== null);
+      if (sessionDirs.length === 0) {
+        return res.status(404).json({ error: '세션을 찾을 수 없습니다. 파일을 다시 업로드해주세요.' });
+      }
 
       const multiConfigPath = path.join(
         SESSIONS_ROOT,
@@ -821,17 +921,25 @@ async function startServer() {
         return res.status(400).json({ error: '내보낼 항목 목록이 비어있습니다.' });
       }
 
-      const pyBin = await ensurePythonEnvironment();
+      const pyBin = getPythonBinary();
       const fmt = String(format || 'dng').toLowerCase();
-      const zipFileName = `SensorClean_${fmt.toUpperCase()}_Sequence_${Date.now()}.zip`;
+      if (!EXPORT_FORMATS[fmt]) {
+        return res.status(400).json({ error: `지원하지 않는 내보내기 형식입니다: ${fmt}` });
+      }
+      const zipFileName = `${batchZipPrefix(res)}SensorClean_${fmt.toUpperCase()}_Sequence_${Date.now()}.zip`;
       const zipPath = path.join(SESSIONS_ROOT, zipFileName);
 
       const exportedFiles: { path: string; name: string }[] = [];
       for (let idx = 0; idx < items.length; idx++) {
         const item = items[idx];
-        const safeSession = String(item.sessionId).replace(/[^a-zA-Z0-9_-]/g, '');
-        const sessionDir = path.join(SESSIONS_ROOT, safeSession);
-        if (!fs.existsSync(sessionDir)) continue;
+        const sessionDir = resolveSessionDir(res, item?.sessionId);
+        if (!sessionDir) continue;
+
+        const frameMeta = readSessionMeta(sessionDir);
+        const formatError = validateExportFormat(fmt, frameMeta);
+        if (formatError) {
+          return res.status(400).json({ error: `${frameMeta.originalFileName || `#${idx + 1}`}: ${formatError}` });
+        }
 
         const paramsFile = path.join(sessionDir, 'inpaint_params.json');
         fs.writeFileSync(
@@ -844,24 +952,8 @@ async function startServer() {
           })
         );
 
-        const metaPath = path.join(sessionDir, 'session_meta.json');
-        const meta = fs.existsSync(metaPath)
-          ? JSON.parse(fs.readFileSync(metaPath, 'utf-8'))
-          : { originalFileName: `photo_${idx + 1}.rw2` };
-        const rawStem = path
-          .basename(meta.originalFileName || 'photo', path.extname(meta.originalFileName || ''))
-          .replace(/[^a-zA-Z0-9._-]/g, '_')
-          .replace(/^_+|_+$/g, '');
-        const baseStem = rawStem || `photo_${idx + 1}`;
-
-        const fmtExtMap: Record<string, string> = {
-          dng: 'dng',
-          tiff16: 'tiff',
-          png: 'png',
-          jpg: 'jpg',
-        };
-        const ext = fmtExtMap[fmt] || 'dng';
-        const outName = `${String(idx + 1).padStart(2, '0')}_${baseStem}_cleaned.${ext}`;
+        const baseStem = toSafeStem(frameMeta.originalFileName, `photo_${idx + 1}`);
+        const outName = `${String(idx + 1).padStart(2, '0')}_${baseStem}_cleaned.${EXPORT_FORMATS[fmt].ext}`;
         const outPath = path.join(sessionDir, outName);
 
         await runPythonPipeline([
@@ -872,6 +964,10 @@ async function startServer() {
           outPath,
         ]);
         exportedFiles.push({ path: outPath, name: outName });
+      }
+
+      if (exportedFiles.length === 0) {
+        return res.status(404).json({ error: '내보낼 수 있는 세션이 없습니다. 파일을 다시 업로드해주세요.' });
       }
 
       const zipScript = `
@@ -960,7 +1056,7 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (!IS_PRODUCTION) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -993,8 +1089,8 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     }
   );
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SensorClean Pro Server listening on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`SensorClean Server listening on http://${HOST}:${PORT}`);
   });
 }
 

@@ -42,6 +42,7 @@ import {
   ViewComparisonMode,
 } from './types/sensor';
 import { COLOR_SPACE_OPTIONS } from './engine/colorSpaces';
+import { DNG_DISABLED_REASON, getDecodeNotice, isDngExportAllowed } from './engine/exportPolicy';
 import { DarkroomCanvas } from './components/DarkroomCanvas';
 import { localSensorEngine } from './services/localSensorEngine';
 
@@ -831,6 +832,10 @@ export function App() {
   };
 
   const enabledSpotsCount = spots.filter((s) => s.enabled).length;
+  const dngAllowed = isDngExportAllowed(meta);
+  const batchDngAllowed =
+    dngAllowed && sequenceItems.every((item) => isDngExportAllowed(item.meta));
+  const decodeNotice = getDecodeNotice(meta);
 
   return (
     <div className="h-[100dvh] w-screen flex flex-col bg-[#2B2B2E] text-[#E7E6E1] overflow-hidden select-none">
@@ -1039,11 +1044,15 @@ export function App() {
                 </div>
                 <button
                   type="button"
+                  disabled={!dngAllowed}
+                  title={dngAllowed ? undefined : DNG_DISABLED_REASON}
                   onClick={() => handleExportFormat('dng')}
-                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
+                  className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                 >
                   <span>DNG</span>
-                  <span className="text-[10px] text-[#888783]">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">
+                    {dngAllowed ? '16-bit · 선형 RGB' : '사용 불가'}
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -1051,7 +1060,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>TIFF</span>
-                  <span className="text-[10px] text-[#888783]">16-bit · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">16-bit · 원본 해상도</span>
                 </button>
                 <button
                   type="button"
@@ -1059,7 +1068,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>PNG</span>
-                  <span className="text-[10px] text-[#888783]">무손실 · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">8-bit · 원본 해상도</span>
                 </button>
                 <button
                   type="button"
@@ -1067,7 +1076,7 @@ export function App() {
                   className="w-full px-3 py-1.5 text-left hover:bg-[#556042] hover:text-[#F7F6F2] flex items-center justify-between cursor-pointer"
                 >
                   <span>JPG</span>
-                  <span className="text-[10px] text-[#888783]">98% · 1:1 원본</span>
+                  <span className="text-[10px] text-[#888783]">98% · 원본 해상도</span>
                 </button>
 
                 {studioMode === 'sequence' && sequenceItems.length > 0 && (
@@ -1081,8 +1090,10 @@ export function App() {
                         <button
                           key={fmt}
                           type="button"
+                          disabled={fmt === 'dng' && !batchDngAllowed}
+                          title={fmt === 'dng' && !batchDngAllowed ? DNG_DISABLED_REASON : undefined}
                           onClick={() => handleBatchExportZip(fmt)}
-                          className="px-2 py-1 rounded bg-[#2B2B2E] hover:bg-[#556042] hover:text-[#F7F6F2] text-[10px] uppercase text-center cursor-pointer border border-[#535356]"
+                          className="px-2 py-1 rounded bg-[#2B2B2E] hover:bg-[#556042] hover:text-[#F7F6F2] text-[10px] uppercase text-center cursor-pointer border border-[#535356] disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {fmt === 'tiff16' ? 'TIFF' : fmt}
                         </button>
@@ -1124,6 +1135,13 @@ export function App() {
           >
             <X className="w-3.5 h-3.5" />
           </button>
+        </div>
+      )}
+
+      {decodeNotice && sessionId && (
+        <div className="px-3 py-1.5 bg-[#3A3318] border-b border-[#6E5F26] text-[#FCD9A5] text-xs flex items-center gap-2 shrink-0 z-30">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>{decodeNotice}</span>
         </div>
       )}
 
@@ -1954,16 +1972,17 @@ export function App() {
               <div className="grid grid-cols-2 gap-2">
                 {(
                   [
-                    { id: 'dng', label: 'DNG', sub: '16-bit' },
+                    { id: 'dng', label: 'DNG', sub: dngAllowed ? '16-bit' : '사용 불가' },
                     { id: 'tiff16', label: 'TIFF', sub: '16-bit' },
-                    { id: 'png', label: 'PNG', sub: '무손실' },
+                    { id: 'png', label: 'PNG', sub: '8-bit' },
                     { id: 'jpg', label: 'JPG', sub: '98%' },
                   ] as const
                 ).map((fmt) => (
                   <button
                     key={fmt.id}
                     type="button"
-                    disabled={!sessionId || isProcessing}
+                    disabled={!sessionId || isProcessing || (fmt.id === 'dng' && !dngAllowed)}
+                    title={fmt.id === 'dng' && !dngAllowed ? DNG_DISABLED_REASON : undefined}
                     onClick={() => handleExportFormat(fmt.id)}
                     className="min-h-[44px] px-3 py-2 rounded bg-[#2B2B2E] border border-[#535356] flex items-center justify-between text-xs font-medium cursor-pointer"
                   >
@@ -1979,8 +1998,10 @@ export function App() {
                 <div className="pt-1 border-t border-[#535356] grid grid-cols-2 gap-2">
                   <button
                     type="button"
+                    disabled={!batchDngAllowed}
+                    title={batchDngAllowed ? undefined : DNG_DISABLED_REASON}
                     onClick={() => handleBatchExportZip('dng')}
-                    className="min-h-[40px] rounded bg-[#556042]/30 border border-[#556042] text-[#E7E6E1] text-xs font-medium cursor-pointer"
+                    className="min-h-[40px] rounded bg-[#556042]/30 border border-[#556042] text-[#E7E6E1] text-xs font-medium cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     전체 DNG ZIP
                   </button>

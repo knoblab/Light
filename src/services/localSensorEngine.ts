@@ -93,7 +93,7 @@ class LocalSensorEngineClient {
       const offset = idx * chunkSize;
       const length = Math.min(chunkSize, fileSizeBytes - offset);
       const pct = Math.round(startPct + ((idx + 1) / totalChunks) * (endPct - startPct));
-      onProgress?.(pct, `무손실 16-bit 데이터 스트리밍 (${idx + 1}/${totalChunks})`);
+      onProgress?.(pct, `내보낸 파일 전송 중 (${idx + 1}/${totalChunks})`);
       const res = await fetch(
         `/api/export-chunk/${encodeURIComponent(sessionId)}/${encodeURIComponent(fileName)}?offset=${offset}&length=${length}`
       );
@@ -136,7 +136,7 @@ class LocalSensorEngineClient {
       if (resp.ok) {
         const data = await resp.json();
         if (data && data.sessionId && data.meta) {
-          onProgress?.(100, '16-bit 무손실 디코딩 완료');
+          onProgress?.(100, 'RAW 디코딩 완료');
           return {
             sessionId: data.sessionId,
             meta: data.meta,
@@ -289,7 +289,7 @@ class LocalSensorEngineClient {
     urls: { previewInpainted: string; maskFinal: string };
   }> {
     if (this.isBackendSession(sessionId)) {
-      onProgress?.(15, '임시 저장본 기반 16-bit 무손실 패키징 중...');
+      onProgress?.(15, '내보낼 파일 생성 중...');
       const resp = await fetch('/api/export-prepare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
