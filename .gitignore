@@ -25,3 +25,4 @@ target/
 **/jniLibs/**/*.so
 *.so
 target
+local.properties
