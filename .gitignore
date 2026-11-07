@@ -17,3 +17,11 @@ target/
 .antigravitycli/
 .aistudio/
 
+
+# Tauri / Mobile build artifacts
+.gradle/
+**/gen/android/.gradle/
+**/gen/android/buildSrc/.gradle/
+**/jniLibs/**/*.so
+*.so
+target

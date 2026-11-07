@@ -468,6 +468,25 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
       }
       ctx.restore();
     }
+
+    // Pixel grid overlay at >= 400% zoom (Phase 5.4)
+    if (zoom >= 4.0) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+      ctx.lineWidth = 0.5;
+      const step = 8;
+      ctx.beginPath();
+      for (let x = 0; x <= canvas.width; x += step) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, canvas.height);
+      }
+      for (let y = 0; y <= canvas.height; y += step) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
   }, [
     meta,
     spots,
@@ -484,9 +503,10 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     isSpacePressed,
     isPanning,
     isPointHitByPath,
+    zoom,
   ]);
 
-  // Wheel handler: vertical/horizontal movement when zoomed in, or Ctrl+Wheel for zoom
+  // Wheel handler: vertical/horizontal movement when zoomed in, or Ctrl+Wheel for zoom (up to 800%)
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (!meta || isProcessing) return;
     e.preventDefault();
@@ -494,7 +514,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     if (e.ctrlKey || e.metaKey) {
       const zoomDelta = e.deltaY < 0 ? 0.25 : -0.25;
       setZoom((prevZoom) => {
-        const nextZoom = Math.max(0.5, Math.min(4.0, Number((prevZoom + zoomDelta).toFixed(2))));
+        const nextZoom = Math.max(0.5, Math.min(8.0, Number((prevZoom + zoomDelta).toFixed(2))));
         setPan((prevPan) => clampPanOffset(prevPan.x, prevPan.y, nextZoom));
         return nextZoom;
       });
@@ -509,7 +529,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     } else if (Math.abs(e.deltaY) > 15) {
       // If at 100% zoom and scrolling up, allow zooming in smoothly
       if (e.deltaY < 0) {
-        setZoom((z) => Math.min(4.0, Number((z + 0.25).toFixed(2))));
+        setZoom((z) => Math.min(8.0, Number((z + 0.25).toFixed(2))));
       }
     }
   };
@@ -725,7 +745,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
     if (overlayMode === 'bw-edge') {
       return urls.vizBwEdge;
     }
-    if (comparisonMode === 'original-only') {
+    if (isSpacePressed || comparisonMode === 'original-only') {
       return urls.previewOriginal;
     }
     if (
@@ -806,7 +826,7 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
             }}
             className="relative inline-block shadow-2xl bg-[#0A0A0A]"
           >
-            {comparisonMode === 'split' && hasInpaintedResult && urls.previewInpainted ? (
+            {comparisonMode === 'split' && hasInpaintedResult && urls.previewInpainted && !isSpacePressed ? (
               <div className="relative select-none">
                 <img
                   src={urls.previewInpainted}
@@ -1098,9 +1118,26 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               </>
             )}
 
+            {hasInpaintedResult && (
+              <button
+                type="button"
+                onPointerDown={() => setIsSpacePressed(true)}
+                onPointerUp={() => setIsSpacePressed(false)}
+                onPointerLeave={() => setIsSpacePressed(false)}
+                className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 select-none ${
+                  isSpacePressed
+                    ? 'bg-[#E5484D] text-[#F7F6F2]'
+                    : 'text-[#888783] hover:text-[#F7F6F2]'
+                }`}
+                title="누르고 있는 동안 원본 사진 표시 (Space 키 동일)"
+              >
+                누르면 원본
+              </button>
+            )}
+
             <div className="w-[1px] h-4 bg-[#535356] mx-0.5 shrink-0" />
 
-            {/* Zoom Controls */}
+            {/* Zoom Controls (Up to 800%) */}
             <button
               type="button"
               onClick={() =>
@@ -1122,13 +1159,13 @@ export const DarkroomCanvas: React.FC<DarkroomCanvasProps> = ({
               type="button"
               onClick={() =>
                 setZoom((z) => {
-                  const next = Math.min(4.0, Number((z + 0.25).toFixed(2)));
+                  const next = Math.min(8.0, Number((z + 0.25).toFixed(2)));
                   setPan((p) => clampPanOffset(p.x, p.y, next));
                   return next;
                 })
               }
               className="p-1 text-[#C2C1BB] hover:text-[#F7F6F2] cursor-pointer shrink-0"
-              title="확대"
+              title="확대 (최대 800%)"
             >
               <ZoomIn className="w-3.5 h-3.5" />
             </button>

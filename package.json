@@ -6,17 +6,18 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "vite",
     "build": "vite build",
-    "start": "node --import tsx server.ts --production",
+    "build:web": "vite build",
+    "build:desktop": "cargo tauri build",
+    "build:android": "cargo tauri android build",
     "preview": "vite preview",
     "clean": "node -e \"for (const p of ['dist','server.js']) require('fs').rmSync(p,{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:rust": "cargo test --workspace",
     "dev:rust": "cargo run -p sc-server",
-    "start:rust": "cargo run --release -p sc-server",
-    "setup:python": "node scripts/setup-python.mjs"
+    "start:rust": "cargo run --release -p sc-server"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

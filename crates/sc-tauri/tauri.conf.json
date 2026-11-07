@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
+  "productName": "SensorClean",
+  "version": "0.1.0",
+  "identifier": "com.knoblab.sensorclean",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "",
+    "frontendDist": "../../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "SensorClean Pro",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "category": "Graphics",
+    "shortDescription": "Camera RAW sensor dust detection and removal",
+    "longDescription": "Bit-exact 16-bit CFA Bayer sensor dust detection, analysis, and inpainting engine.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -108,6 +108,8 @@ pub struct ExifMetadata {
     pub focal_length: Option<String>,
     pub date_time: Option<String>,
     pub software: String,
+    #[serde(default)]
+    pub raw_xmp_bytes: Vec<u8>,
 }
 
 impl Default for ExifMetadata {
@@ -121,6 +123,7 @@ impl Default for ExifMetadata {
             focal_length: None,
             date_time: None,
             software: "SensorClean Pro 16-bit Pipeline".into(),
+            raw_xmp_bytes: Vec::new(),
         }
     }
 }

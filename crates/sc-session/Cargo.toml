@@ -17,6 +17,8 @@ sc-core = { path = "../sc-core" }
 sc-decode = { path = "../sc-decode" }
 sc-detect = { path = "../sc-detect" }
 sc-imgproc = { path = "../sc-imgproc" }
+sc-heal = { path = "../sc-heal" }
+sc-dng = { path = "../sc-dng" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -26,6 +26,7 @@ pub mod gaussian;
 pub mod morph;
 pub mod resize;
 pub mod sobel;
+pub mod telea;
 
 pub use contours::{ComponentCandidate, extract_sharp_candidates};
 pub use dist_transform::pad_invalid_border_nearest;
@@ -37,3 +38,4 @@ pub use resize::{
     resize_nearest_u8,
 };
 pub use sobel::{gradient_magnitude_f32, sobel_3x3_f32};
+pub use telea::{inpaint_telea_f32, inpaint_telea_harmonic_f32};

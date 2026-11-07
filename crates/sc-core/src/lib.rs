@@ -11,11 +11,13 @@
     clippy::unreachable
 )]
 
+pub mod cancel;
 pub mod error;
 pub mod geometry;
 pub mod policy;
 pub mod types;
 
+pub use cancel::{CancelToken, NoopProgressSink, ProgressSink};
 pub use error::{Result, ScError};
 pub use geometry::{CropRect, Geometry, Orientation, Point2f};
 pub use policy::{DNG_DISABLED_REASON, get_decode_notice, is_dng_export_allowed, validate_export_format};

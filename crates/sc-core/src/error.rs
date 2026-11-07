@@ -22,6 +22,9 @@ pub enum ScError {
     #[error("파이프라인 실행 오류: {0}")]
     Pipeline(String),
 
+    #[error("작업이 사용자에 의해 취소되었습니다.")]
+    Cancelled,
+
     #[error("입출력 오류: {0}")]
     Io(#[from] std::io::Error),
 
@@ -38,6 +41,7 @@ impl ScError {
             ScError::SessionNotFound(_) => "SESSION_NOT_FOUND",
             ScError::InvalidArgument(_) => "INVALID_ARGUMENT",
             ScError::Pipeline(_) => "PIPELINE_ERROR",
+            ScError::Cancelled => "CANCELLED",
             ScError::Io(_) => "IO_ERROR",
             ScError::Json(_) => "JSON_ERROR",
         }

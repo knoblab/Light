@@ -526,6 +526,35 @@ pub fn inpaint_16bit_linear_native(
         }
     }
 
+    let cfa_raw_path = session_dir.join("cfa_raw.npy");
+    let has_cfa = if cfa_raw_path.exists() {
+        if let Ok((_, cfa_data)) = read_npy_u16(&cfa_raw_path) {
+            let pattern = sc_heal::BayerPattern::from_bayer_str(&meta.bayer_pattern);
+            let (healed_cfa, _cfa_rois) = sc_heal::heal_cfa_image(
+                &cfa_data,
+                full_w,
+                full_h,
+                &params.spots,
+                &params.manual_strokes,
+                pattern,
+                params.inpaint_radius,
+                params.preserve_grain,
+                42,
+                None,
+            );
+            let _ = write_npy_u16(
+                &session_dir.join("inpainted_cfa.npy"),
+                &[full_h, full_w],
+                &healed_cfa,
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     write_npy_u16(
         &session_dir.join("inpainted_16bit.npy"),
         &[full_h, full_w, 3],
@@ -544,18 +573,33 @@ pub fn inpaint_16bit_linear_native(
             .round()
             / 10000.0;
 
+    let method_str = if has_cfa {
+        "Sensor-Exact CFA Bayer Telea Inpainting + Harmonic Detrending"
+    } else {
+        "Incremental Checkpoint + Plane-Detrended 16-bit Harmonic Telea"
+    };
+
     let res = InpaintResult {
         healed_spots_count: enabled_spot_count,
         inpainted_pixels,
         inpainted_area_pct: area_pct,
-        bit_depth: "16-bit Linear RGB (uint16, 0–65535)".into(),
-        inpaint_method: "Incremental Checkpoint + Plane-Detrended 16-bit Harmonic Telea".into(),
+        bit_depth: if has_cfa {
+            "16-bit CFA Bayer Raw (uint16, 0–65535)".into()
+        } else {
+            "16-bit Linear RGB (uint16, 0–65535)".into()
+        },
+        inpaint_method: method_str.into(),
         inpaint_radius: params.inpaint_radius,
         full_width: full_w,
         full_height: full_h,
         from_cache: false,
         incremental_rois: roi_count,
     };
+
+    let _ = std::fs::write(
+        session_dir.join("inpaint_params.json"),
+        serde_json::to_string_pretty(params)?,
+    );
 
     std::fs::write(
         session_dir.join("inpaint_result.json"),
@@ -701,7 +745,38 @@ pub fn export_healed_image_native(
 
     let (ext, mime_type) = match fmt.as_str() {
         "dng" => {
-            write_tiff16_rgb(output_path, &rgb_16bit, w, h, true, &meta)?;
+            let cfa_inpainted_path = session_dir.join("inpainted_cfa.npy");
+            let cfa_raw_path = session_dir.join("cfa_raw.npy");
+            let cfa_buf = if cfa_inpainted_path.exists() {
+                Some(read_npy_u16(&cfa_inpainted_path)?)
+            } else if cfa_raw_path.exists() {
+                Some(read_npy_u16(&cfa_raw_path)?)
+            } else {
+                None
+            };
+
+            if let Some((_, cfa)) = cfa_buf {
+                sc_dng::write_cfa_dng(output_path, &cfa, w, h, &meta)?;
+
+                // Generate and write Lightroom/ACR-compatible XMP sidecar alongside DNG
+                let inpaint_params_path = session_dir.join("inpaint_params.json");
+                if inpaint_params_path.exists()
+                    && let Ok(content) = std::fs::read_to_string(&inpaint_params_path)
+                    && let Ok(params) = serde_json::from_str::<InpaintParams>(&content)
+                {
+                    let xmp_path = output_path.with_extension("xmp");
+                    let _ = sc_dng::write_xmp_sidecar(
+                        &xmp_path,
+                        &cfa,
+                        w,
+                        h,
+                        &params.spots,
+                        &params.manual_strokes,
+                    );
+                }
+            } else {
+                write_tiff16_rgb(output_path, &rgb_16bit, w, h, true, &meta)?;
+            }
             ("dng", "image/x-adobe-dng")
         }
         "tiff16" => {
@@ -710,7 +785,14 @@ pub fn export_healed_image_native(
             } else {
                 linear_16bit_to_srgb_16bit(&rgb_16bit, w, h, Some(1.0)).0
             };
-            write_tiff16_rgb(output_path, &srgb16, w, h, false, &meta)?;
+            sc_dng::write_rendered_tiff16(
+                output_path,
+                &srgb16,
+                w,
+                h,
+                sc_color::spaces::ColorSpace::DisplayP3,
+                &meta,
+            )?;
             ("tiff", "image/tiff")
         }
         "png" => {
@@ -722,7 +804,14 @@ pub fn export_healed_image_native(
             } else {
                 linear_16bit_to_srgb_8bit(&rgb_16bit, w, h, Some(meta.exposure_scale)).0
             };
-            write_png_rgb(output_path, &srgb8, w, h)?;
+            sc_dng::write_rendered_png8(
+                output_path,
+                &srgb8,
+                w,
+                h,
+                sc_color::spaces::ColorSpace::Srgb,
+                &meta,
+            )?;
             ("png", "image/png")
         }
         _ => {
@@ -734,7 +823,15 @@ pub fn export_healed_image_native(
             } else {
                 linear_16bit_to_srgb_8bit(&rgb_16bit, w, h, Some(meta.exposure_scale)).0
             };
-            write_jpeg_rgb(output_path, &srgb8, w, h, 98)?;
+            sc_dng::write_rendered_jpeg(
+                output_path,
+                &srgb8,
+                w,
+                h,
+                98,
+                sc_color::spaces::ColorSpace::Srgb,
+                &meta,
+            )?;
             ("jpg", "image/jpeg")
         }
     };

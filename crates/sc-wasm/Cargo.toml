@@ -1,0 +1,32 @@
+[package]
+name = "sc-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-decode = { path = "../sc-decode" }
+sc-detect = { path = "../sc-detect" }
+sc-heal = { path = "../sc-heal" }
+sc-dng = { path = "../sc-dng" }
+sc-color = { path = "../sc-color" }
+sc-imgproc = { path = "../sc-imgproc" }
+
+wasm-bindgen = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["console"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+jpeg-encoder = { workspace = true }
+base64 = "0.21"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

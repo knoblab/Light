@@ -139,7 +139,7 @@ pub fn cluster_multi_frame_spots(
                     contrast_drop_pct: 1.5,
                     spot_type: Some(if is_bokeh_proj { "bokeh" } else { "sharp" }.to_string()),
                     confidence: Some(c_info.mean_confidence),
-                    enabled: true,
+                    enabled: false,
                     is_manual: false,
                     tier: Some("projected".to_string()),
                     is_projected: Some(true),

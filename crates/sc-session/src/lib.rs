@@ -249,6 +249,78 @@ pub fn ingest_image_to_session(
         96,
     )?;
 
+    if let Some(ref raw) = ingested.raw_image
+        && raw.cfa.is_some()
+        && raw.cpp == 1
+        && let Ok(cfa_data) = sc_decode::raw_pixels_u16(raw)
+    {
+        write_npy_u16(&session_dir.join("cfa_raw.npy"), &[raw.height, raw.width], cfa_data)?;
+    }
+
+    std::fs::write(
+        session_dir.join("session_meta.json"),
+        serde_json::to_string_pretty(&ingested.meta)?,
+    )?;
+
+    Ok(ingested.meta)
+}
+
+/// Ingests in-memory image/RAW bytes into `session_dir`, saving `.npy` buffers, `preview_original.jpg`,
+/// and `session_meta.json`.
+pub fn ingest_bytes_to_session(
+    bytes: &[u8],
+    file_name: &str,
+    session_dir: &Path,
+) -> Result<SessionMetadata> {
+    std::fs::create_dir_all(session_dir)?;
+    let ext = Path::new(file_name)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rw2")
+        .to_ascii_lowercase();
+    let ingested = sc_decode::ingest_bytes(bytes, file_name, &ext)?;
+
+    let fw = ingested.meta.full_width;
+    let fh = ingested.meta.full_height;
+    let ww = ingested.meta.work_width;
+    let wh = ingested.meta.work_height;
+
+    write_npy_u16(
+        &session_dir.join("linear_16bit.npy"),
+        &[fh, fw, 3],
+        &ingested.linear_16bit,
+    )?;
+    write_npy_u16(
+        &session_dir.join("work_linear_16bit.npy"),
+        &[wh, ww, 3],
+        &ingested.work_linear_16bit,
+    )?;
+    write_npy_u8(
+        &session_dir.join("work_srgb_u8.npy"),
+        &[wh, ww, 3],
+        &ingested.work_srgb_u8,
+    )?;
+    write_npy_f32(
+        &session_dir.join("det_gray.npy"),
+        &[wh, ww],
+        &ingested.det_gray,
+    )?;
+    write_jpeg_rgb(
+        &session_dir.join("preview_original.jpg"),
+        &ingested.work_srgb_u8,
+        ww,
+        wh,
+        96,
+    )?;
+
+    if let Some(ref raw) = ingested.raw_image
+        && raw.cfa.is_some()
+        && raw.cpp == 1
+        && let Ok(cfa_data) = sc_decode::raw_pixels_u16(raw)
+    {
+        write_npy_u16(&session_dir.join("cfa_raw.npy"), &[raw.height, raw.width], cfa_data)?;
+    }
+
     std::fs::write(
         session_dir.join("session_meta.json"),
         serde_json::to_string_pretty(&ingested.meta)?,

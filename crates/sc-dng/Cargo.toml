@@ -1,0 +1,28 @@
+[package]
+name = "sc-dng"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-color = { path = "../sc-color" }
+sc-heal = { path = "../sc-heal" }
+
+lightcraft-raw = { workspace = true }
+lightcraft-tiff = { workspace = true }
+lightcraft-meta = { workspace = true }
+lightcraft-color = { workspace = true }
+lightcraft-raster = { workspace = true }
+
+image = { workspace = true }
+png = { workspace = true }
+jpeg-encoder = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }

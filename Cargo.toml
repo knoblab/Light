@@ -7,8 +7,12 @@ members = [
     "crates/sc-detect",
     "crates/sc-decode",
     "crates/sc-session",
+    "crates/sc-heal",
+    "crates/sc-dng",
     "crates/sc-server",
     "crates/sc-cli",
+    "crates/sc-wasm",
+    "crates/sc-tauri",
 ]
 
 [workspace.package]
@@ -41,3 +45,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 proptest = "1.5"
 tempfile = "3.13"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+web-sys = "0.3"
+

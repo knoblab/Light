@@ -12,10 +12,21 @@
 )]
 
 pub mod annulus;
+pub mod cfa_luma;
 pub mod multi;
+pub mod noise_model;
+pub mod profile;
+pub mod tiles;
 
 pub use annulus::{AnnulusEval, AnnulusGrids, eval_single_radius_annulus, verify_annulus_plane_snr};
+pub use cfa_luma::{extract_cfa_half_streams, BayerLayout, CfaHalfStreams};
 pub use multi::cluster_multi_frame_spots;
+pub use noise_model::NoiseModel;
+pub use profile::{match_against_sensor_profile, ApertureModel};
+pub use tiles::{
+    deduplicate_tile_candidates, extract_tile_buffer, generate_tile_specs, TileSpec,
+    DEFAULT_HALO, DEFAULT_TILE_SIZE,
+};
 
 use rayon::prelude::*;
 use sc_color::{median_f32, percentile_f32};
@@ -66,10 +77,10 @@ pub struct DetectionOutput {
     pub viz_bw_edge_rgb: Vec<u8>,
 }
 
-/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`),
-/// matching `detect_sensor_dust` in `raw_pipeline.py:677-1020`.
+/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`)
+/// with cooperative cancellation support.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_from_gray(
+pub fn detect_from_gray_cancellable(
     gray_det: &[f32],
     det_w: usize,
     det_h: usize,
@@ -79,10 +90,11 @@ pub fn detect_from_gray(
     work_h: usize,
     work_scale: f64,
     params: &DetectionParams,
-) -> DetectionOutput {
+    cancel: Option<&sc_core::CancelToken>,
+) -> sc_core::Result<DetectionOutput> {
     let n_det = det_w.saturating_mul(det_h);
     if det_w == 0 || det_h == 0 || gray_det.len() < n_det {
-        return DetectionOutput {
+        return Ok(DetectionOutput {
             result: DetectionResult {
                 method: params.method.clone(),
                 sensitivity: params.sensitivity,
@@ -100,7 +112,11 @@ pub fn detect_from_gray(
             },
             mask_auto_u8: vec![0u8; work_w * work_h],
             viz_bw_edge_rgb: vec![0u8; work_w * work_h * 3],
-        };
+        });
+    }
+
+    if let Some(c) = cancel {
+        c.check()?;
     }
 
     let _ = full_h;
@@ -118,6 +134,10 @@ pub fn detect_from_gray(
     // 1. Pad black letterbox/pillarbox bars (< 8.0) with nearest valid photo pixels
     let valid_photo_mask: Vec<bool> = gray_det[..n_det].iter().map(|&v| v >= 8.0).collect();
     let gray_filt = pad_invalid_border_nearest(&gray_det[..n_det], det_w, det_h, 8.0);
+
+    if let Some(c) = cancel {
+        c.check()?;
+    }
 
     // 2. Regional Background Macro-Std Map (sigma=22) & High-Frequency Foliage Texture Map
     let s1 = gaussian_blur_f32(&gray_filt, det_w, det_h, 0.9);
@@ -567,9 +587,67 @@ pub fn detect_from_gray(
         spots: accepted_spots,
     };
 
-    DetectionOutput {
+    Ok(DetectionOutput {
         result,
         mask_auto_u8,
         viz_bw_edge_rgb,
+    })
+}
+
+/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`),
+/// matching `detect_sensor_dust` in `raw_pipeline.py:677-1020`.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_from_gray(
+    gray_det: &[f32],
+    det_w: usize,
+    det_h: usize,
+    full_w: usize,
+    full_h: usize,
+    work_w: usize,
+    work_h: usize,
+    work_scale: f64,
+    params: &DetectionParams,
+) -> DetectionOutput {
+    detect_from_gray_cancellable(
+        gray_det, det_w, det_h, full_w, full_h, work_w, work_h, work_scale, params, None,
+    )
+    .unwrap_or_else(|_| DetectionOutput {
+        result: DetectionResult {
+            method: params.method.clone(),
+            sensitivity: params.sensitivity,
+            cloud_protection: params.cloud_protection,
+            min_radius: params.min_radius,
+            max_radius: params.max_radius,
+            min_circularity: params.min_circularity,
+            total_detected: 0,
+            sharp_count: 0,
+            bokeh_count: 0,
+            multi_confirmed_count: None,
+            single_frame_count: None,
+            projected_count: None,
+            spots: Vec::new(),
+        },
+        mask_auto_u8: vec![0u8; work_w * work_h],
+        viz_bw_edge_rgb: vec![0u8; work_w * work_h * 3],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_stops_detection_immediately() {
+        let w = 128usize;
+        let h = 128usize;
+        let gray = vec![128.0f32; w * h];
+        let params = DetectionParams::default();
+        let cancel = sc_core::CancelToken::new();
+        cancel.cancel(); // Pre-cancelled
+
+        let res = detect_from_gray_cancellable(
+            &gray, w, h, w, h, w, h, 1.0, &params, Some(&cancel),
+        );
+        assert!(matches!(res, Err(sc_core::ScError::Cancelled)));
     }
 }

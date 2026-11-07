@@ -164,6 +164,7 @@ fn extract_exif_from_raw(raw: &RawImage) -> ExifMetadata {
         focal_length,
         date_time,
         software: "SensorClean Pro 16-bit Pipeline".into(),
+        raw_xmp_bytes: Vec::new(),
     }
 }
 

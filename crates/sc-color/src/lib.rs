@@ -11,6 +11,9 @@
     clippy::unreachable
 )]
 
+pub mod icc;
+pub mod spaces;
+
 use rayon::prelude::*;
 
 /// Exact linear-interpolated percentile matching `np.percentile(arr, q_pct)` (`0.0 <= q_pct <= 100.0`).

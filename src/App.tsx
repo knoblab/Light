@@ -22,6 +22,8 @@ import {
   Plus,
   Search,
   Hand,
+  Cpu,
+  Layers,
 } from 'lucide-react';
 import {
   ColorSpaceId,
@@ -45,6 +47,8 @@ import { COLOR_SPACE_OPTIONS } from './engine/colorSpaces';
 import { DNG_DISABLED_REASON, getDecodeNotice, isDngExportAllowed } from './engine/exportPolicy';
 import { DarkroomCanvas } from './components/DarkroomCanvas';
 import { localSensorEngine } from './services/localSensorEngine';
+import { EngineInspectorModal } from './components/EngineInspectorModal';
+import { BatchQueueDrawer, BatchItem } from './components/BatchQueueDrawer';
 
 type MobileDrawerTab = 'tools' | 'detect' | 'heal' | 'spots' | 'export' | null;
 
@@ -144,6 +148,10 @@ export function App() {
   });
   const [selectedColorSpace, setSelectedColorSpace] = useState<ColorSpaceId>('auto');
   const [isExportMenuOpen, setIsExportMenuOpen] = useState<boolean>(false);
+
+  const [isEngineModalOpen, setIsEngineModalOpen] = useState<boolean>(false);
+  const [isBatchQueueOpen, setIsBatchQueueOpen] = useState<boolean>(false);
+  const [batchQueueItems, setBatchQueueItems] = useState<BatchItem[]>([]);
 
   // Mobile Drawer state
   const [mobileTab, setMobileTab] = useState<MobileDrawerTab>(null);
@@ -1105,6 +1113,32 @@ export function App() {
             )}
           </div>
 
+          {/* Batch Queue Drawer Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsBatchQueueOpen(true)}
+            title="일괄 배치 대기열 (Batch Queue)"
+            className="flex items-center gap-1 px-2 py-1.5 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#C2C1BB] hover:text-[#F7F6F2] transition-colors cursor-pointer text-xs"
+          >
+            <Layers className="w-3.5 h-3.5 text-[#889B6E]" />
+            <span className="hidden lg:inline text-[11px]">배치</span>
+            {batchQueueItems.length > 0 && (
+              <span className="text-[10px] bg-[#3A3A3D] px-1 rounded-full font-mono">
+                {batchQueueItems.length}
+              </span>
+            )}
+          </button>
+
+          {/* Engine Diagnostics Modal Toggle */}
+          <button
+            type="button"
+            onClick={() => setIsEngineModalOpen(true)}
+            title="Rust 엔진 진단 인스펙터"
+            className="p-1.5 rounded bg-[#2B2B2E] hover:bg-[#535356] border border-[#535356] text-[#C2C1BB] hover:text-[#F7F6F2] transition-colors cursor-pointer"
+          >
+            <Cpu className="w-4 h-4 text-[#889B6E]" />
+          </button>
+
           {/* Desktop Right Inspector Toggle */}
           <button
             type="button"
@@ -2047,6 +2081,43 @@ export function App() {
           );
         })}
       </nav>
+
+      {/* Engine Diagnostics Inspector Modal */}
+      <EngineInspectorModal
+        isOpen={isEngineModalOpen}
+        onClose={() => setIsEngineModalOpen(false)}
+        meta={meta}
+      />
+
+      {/* Batch Processing Queue Drawer */}
+      <BatchQueueDrawer
+        isOpen={isBatchQueueOpen}
+        onClose={() => setIsBatchQueueOpen(false)}
+        items={batchQueueItems}
+        onAddFiles={(files) => {
+          const newItems: BatchItem[] = files.map((f) => ({
+            id: `batch_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            file: f,
+            spots: [],
+            status: 'queued',
+            progress: 0,
+          }));
+          setBatchQueueItems((prev) => [...prev, ...newItems]);
+        }}
+        onRemoveItem={(id) => {
+          setBatchQueueItems((prev) => prev.filter((it) => it.id !== id));
+        }}
+        onClearCompleted={() => {
+          setBatchQueueItems((prev) => prev.filter((it) => it.status !== 'exported'));
+        }}
+        onSelectCurrentItem={(id) => {
+          const it = batchQueueItems.find((item) => item.id === id);
+          if (it) {
+            handleUploadFile(it.file);
+          }
+        }}
+        params={params}
+      />
     </div>
   );
 }

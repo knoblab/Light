@@ -1,61 +1,61 @@
 /// <reference lib="webworker" />
 
+/**
+ * Pure-Rust WebAssembly Sensor Worker for SensorClean.
+ * Zero JavaScript/TypeScript image processing algorithms: all operations
+ * (RAW decoding, multiscale DoG detection, CFA inpainting, DNG 1.6 generation)
+ * are executed via sc-wasm compiled to wasm32-unknown-unknown.
+ */
+
+import initWasm, {
+  wasm_init,
+  wasm_ingest_and_detect,
+  wasm_detect,
+  wasm_inpaint,
+  wasm_render_tile,
+  wasm_export_file,
+  wasm_multi_detect,
+  wasm_cancel_session,
+  wasm_drop_session,
+} from '../../crates/sc-wasm/pkg/sc_wasm.js';
+import wasmUrl from '../../crates/sc-wasm/pkg/sc_wasm_bg.wasm?url';
 import {
   ColorSpaceId,
   DetectedDustSpot,
   DetectionParams,
-  DetectionResult,
   DetailedProgressInfo,
-  InpaintResult,
   ManualBrushStroke,
-  SessionMetadata,
 } from '../types/sensor';
-import { decodeImageFileLocal } from '../engine/tiffRawDecoder';
-import { DNG_DISABLED_REASON, isDngExportAllowed } from '../engine/exportPolicy';
-import {
-  computeDetGrayFromRgb8,
-  detectSensorDustLocal,
-  inpaint16BitAndCameraRgbLocal,
-  LocalCheckpointState,
-  resizeRgb8Area,
-  runMultiFrameClustering,
-} from '../engine/dustAlgorithms';
-import {
-  buildZipArchiveBlob,
-  encodeMaskU8ToBlob,
-  encodeRgb8ToBlob,
-  injectMetadataAndIccToJpegBlob,
-  injectMetadataToPngBlob,
-  writeLinearDngBuffer,
-  writeTiff16Buffer,
-} from '../engine/binaryExporters';
-import {
-  buildIccProfileBytes,
-  COLOR_SPACE_DEFS,
-  transformLinear16ColorSpace,
-  transformRgb8ColorSpace,
-} from '../engine/colorSpaces';
+import { buildZipArchiveBlob } from '../utils/zip';
 
-interface WorkerSessionData {
-  sessionId: string;
-  meta: SessionMetadata;
-  origRgb8: Uint8Array;
-  linear16: Uint16Array;
-  workRgb8: Uint8Array;
-  detGray: Float32Array;
-  healedRgb8?: Uint8Array;
-  healedLinear16?: Uint16Array;
-  checkpoint?: LocalCheckpointState;
-  rawIccProfileBytes?: Uint8Array;
-  lastDetection?: DetectionResult;
+let wasmInitPromise: Promise<void> | null = null;
+
+async function ensureWasm(): Promise<void> {
+  if (!wasmInitPromise) {
+    wasmInitPromise = (async () => {
+      await initWasm({ module_or_path: wasmUrl });
+      wasm_init();
+    })();
+  }
+  return wasmInitPromise;
 }
 
-const sessions = new Map<string, WorkerSessionData>();
-
-function assertExportFormatAllowed(session: WorkerSessionData, format: string) {
-  if (format.toLowerCase() === 'dng' && !isDngExportAllowed(session.meta)) {
-    throw new Error(`${session.meta.originalFileName}: ${DNG_DISABLED_REASON}`);
+function base64ToBlob(base64: string, mimeType: string): Blob {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
   }
+  return new Blob([bytes], { type: mimeType });
+}
+
+function sendProgress(reqId: number, percent: number, label?: string) {
+  self.postMessage({
+    id: reqId,
+    type: 'progress',
+    percent: Math.min(100, Math.max(0, percent)),
+    label,
+  });
 }
 
 function sendDetailedProgress(
@@ -66,7 +66,6 @@ function sendDetailedProgress(
   stepPercent: number,
   overallPercent?: number
 ) {
-  const stepW = 100 / Math.max(1, totalSteps);
   const computedOverall =
     overallPercent !== undefined
       ? overallPercent
@@ -80,298 +79,72 @@ function sendDetailedProgress(
     overallPercent: Math.min(100, Math.max(0, Math.round(computedOverall))),
   };
 
-  const label = `${stepIndex}/${totalSteps}단계 · ${stepName} (${progressInfo.stepPercent}%)`;
-
   self.postMessage({
     id: reqId,
     type: 'progress',
     percent: progressInfo.overallPercent,
-    label,
+    label: `${stepIndex}/${totalSteps}단계 · ${stepName} (${progressInfo.stepPercent}%)`,
     progressInfo,
   });
 }
 
-function sendProgress(reqId: number, percent: number, label?: string) {
-  self.postMessage({
-    id: reqId,
-    type: 'progress',
-    percent: Math.min(100, Math.max(0, percent)),
-    label,
-  });
-}
-
-async function processSingleIngestAndDetect(
-  reqId: number,
-  sessionId: string,
-  fileName: string,
-  buffer: ArrayBuffer,
-  params: DetectionParams
-) {
-  sendProgress(reqId, 8, '파일 바이너리 파싱 중');
-  const decoded = await decodeImageFileLocal(fileName, buffer);
-  sendProgress(reqId, 22, '16-bit 메타데이터 추출 중');
-  const fullW = decoded.fullWidth;
-  const fullH = decoded.fullHeight;
-
-  const maxWorkDim = 2304;
-  let workScale = 1.0;
-  let workW = fullW;
-  let workH = fullH;
-  if (Math.max(fullW, fullH) > maxWorkDim) {
-    workScale = maxWorkDim / Math.max(fullW, fullH);
-    workW = Math.max(1, Math.round(fullW * workScale));
-    workH = Math.max(1, Math.round(fullH * workScale));
-  }
-
-  sendProgress(reqId, 30, '센서 작업 버퍼 추출 중');
-  const workRgb8 =
-    workW === fullW && workH === fullH
-      ? new Uint8Array(decoded.origRgb8)
-      : resizeRgb8Area(decoded.origRgb8, fullW, fullH, workW, workH);
-
-  sendProgress(reqId, 36, '그레이스케일 변환 중');
-  const detGray = computeDetGrayFromRgb8(workRgb8, workW, workH);
-
-  // Compute 16-bit stats
-  let minVal = 65535;
-  let maxVal = 0;
-  let sumVal = 0;
-  let cnt = 0;
-  const step = Math.max(3, Math.floor(decoded.linear16.length / 30000) * 3);
-  for (let i = 0; i < decoded.linear16.length; i += step) {
-    const v = decoded.linear16[i];
-    if (v < minVal) minVal = v;
-    if (v > maxVal) maxVal = v;
-    sumVal += v;
-    cnt++;
-  }
-  const meanVal = cnt > 0 ? Math.round((sumVal / cnt) * 10) / 10 : 12000;
-  const drEv =
-    maxVal > minVal
-      ? Math.round(Math.log2(Math.max(maxVal, 1) / Math.max(minVal, 1)) * 100) / 100
-      : 14.0;
-
-  const colorSpaceName =
-    decoded.detectedColorSpace && decoded.detectedColorSpace !== 'auto'
-      ? COLOR_SPACE_DEFS[decoded.detectedColorSpace]?.name || 'Adobe RGB (1998)'
-      : decoded.isRaw
-      ? 'Original Camera Color & Tone Profile'
-      : 'Original sRGB 1:1';
-
-  const meta: SessionMetadata = {
-    originalFileName: fileName,
-    extension: decoded.extension,
-    isRaw: decoded.isRaw,
-    decodeKind: decoded.decodeKind,
-    isLinear16: decoded.isLinear16 ?? true,
-    fullWidth: fullW,
-    fullHeight: fullH,
-    workWidth: workW,
-    workHeight: workH,
-    workScale,
-    exposureScale: decoded.exposureScale,
-    bitDepth:
-      decoded.decodeKind === 'embedded-preview'
-        ? '8-bit 내장 미리보기 (센서 데이터 아님)'
-        : decoded.decodeKind === 'image-8bit'
-        ? '8-bit 이미지'
-        : '16-bit',
-    colorSpace: colorSpaceName,
-    detectedColorSpace: decoded.detectedColorSpace,
-    hasEmbeddedIcc: Boolean(decoded.rawIccProfileBytes),
-    cameraWb: [1.0, 1.0, 1.0, 1.0],
-    colorMatrix: [],
-    blackLevel: [0, 0, 0, 0],
-    whiteLevel: 65535,
-    bayerPattern: 'RGBG',
-    stats16Bit: {
-      minCodeValue: minVal,
-      maxCodeValue: maxVal,
-      meanCodeValue: meanVal,
-      estimatedDynamicRangeEv: drEv,
-    },
-    exif: decoded.exif,
-  };
-
-  const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
-    detGray,
-    workW,
-    workH,
-    fullW,
-    fullH,
-    workW,
-    workH,
-    workScale,
-    params,
-    (detPct, detLabel) => {
-      const mapped = Math.round(40 + (detPct / 100) * 48); // 40% ~ 88%
-      sendProgress(reqId, mapped, detLabel);
-    }
-  );
-
-  sessions.set(sessionId, {
-    sessionId,
-    meta,
-    origRgb8: decoded.origRgb8,
-    linear16: decoded.linear16,
-    workRgb8,
-    detGray,
-    rawIccProfileBytes: decoded.rawIccProfileBytes,
-    lastDetection: detectionResult,
-  });
-
-  sendProgress(reqId, 92, '다크룸 캔버스 인코딩 중');
-
-  const [previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
-    encodeRgb8ToBlob(workRgb8, workW, workH, 'image/jpeg', 0.96),
-    encodeRgb8ToBlob(vizBwEdgeRgb8, workW, workH, 'image/jpeg', 0.92),
-    encodeMaskU8ToBlob(maskAutoU8, workW, workH),
-  ]);
-
-  sendProgress(reqId, 100, '로딩 및 분석 완료');
-
-  return {
-    sessionId,
-    meta,
-    detection: detectionResult,
-    blobs: {
-      previewOriginalBlob,
-      vizBwEdgeBlob,
-      maskAutoBlob,
-    },
-  };
-}
-
-async function renderExportBuffer(
-  session: WorkerSessionData,
-  format: 'dng' | 'tiff16' | 'png' | 'jpg',
-  healedRgb8: Uint8Array,
-  healedLinear16: Uint16Array,
-  targetColorSpace: ColorSpaceId = 'auto'
-): Promise<{ blob: Blob; ext: string; mimeType: string }> {
-  const { fullWidth: w, fullHeight: h } = session.meta;
-  const fmt = format.toLowerCase();
-
-  const sourceSpace: Exclude<ColorSpaceId, 'auto'> =
-    session.meta.detectedColorSpace && session.meta.detectedColorSpace !== 'auto'
-      ? session.meta.detectedColorSpace
-      : 'adobe-rgb';
-
-  const effectiveTargetSpace: Exclude<ColorSpaceId, 'auto'> =
-    targetColorSpace === 'auto' ? sourceSpace : targetColorSpace;
-
-  let exportRgb8 = healedRgb8;
-  let exportLinear16 = healedLinear16;
-
-  // Convert color space only if user explicitly selected a different target space
-  if (targetColorSpace !== 'auto' && targetColorSpace !== sourceSpace) {
-    exportRgb8 = new Uint8Array(healedRgb8.length);
-    transformRgb8ColorSpace(healedRgb8, exportRgb8, sourceSpace, effectiveTargetSpace);
-    exportLinear16 = new Uint16Array(healedLinear16.length);
-    transformLinear16ColorSpace(healedLinear16, exportLinear16, sourceSpace, effectiveTargetSpace);
-  }
-
-  const customIcc =
-    session.rawIccProfileBytes && (targetColorSpace === 'auto' || targetColorSpace === sourceSpace)
-      ? session.rawIccProfileBytes
-      : buildIccProfileBytes(effectiveTargetSpace);
-
-  if (fmt === 'dng') {
-    const dngBuf = writeLinearDngBuffer(
-      exportRgb8,
-      exportLinear16,
-      w,
-      h,
-      session.meta,
-      effectiveTargetSpace,
-      customIcc
-    );
-    return {
-      blob: new Blob([dngBuf], { type: 'image/x-adobe-dng' }),
-      ext: 'dng',
-      mimeType: 'image/x-adobe-dng',
-    };
-  } else if (fmt === 'tiff16') {
-    const tiffBuf = writeTiff16Buffer(
-      exportRgb8,
-      exportLinear16,
-      w,
-      h,
-      session.meta,
-      effectiveTargetSpace,
-      customIcc
-    );
-    return {
-      blob: new Blob([tiffBuf], { type: 'image/tiff' }),
-      ext: 'tiff',
-      mimeType: 'image/tiff',
-    };
-  } else if (fmt === 'png') {
-    const pngBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/png');
-    const metaPngBlob = await injectMetadataToPngBlob(pngBlob, session.meta);
-    return {
-      blob: metaPngBlob,
-      ext: 'png',
-      mimeType: 'image/png',
-    };
-  } else {
-    const baseJpgBlob = await encodeRgb8ToBlob(exportRgb8, w, h, 'image/jpeg', 0.98);
-    const metaJpgBlob = await injectMetadataAndIccToJpegBlob(baseJpgBlob, session.meta, customIcc);
-    return {
-      blob: metaJpgBlob,
-      ext: 'jpg',
-      mimeType: 'image/jpeg',
-    };
-  }
-}
+const fileNames = new Map<string, string>();
 
 self.onmessage = async (event: MessageEvent) => {
   const { id, action, payload } = event.data || {};
   try {
+    await ensureWasm();
+
     if (action === 'ingest_and_detect') {
       const { sessionId, fileName, buffer, params } = payload;
-      const res = await processSingleIngestAndDetect(id, sessionId, fileName, buffer, params);
-      self.postMessage({ id, ok: true, data: res });
+      sendDetailedProgress(id, 1, 4, 'Rust WebAssembly 엔진 초기화', 20, 10);
+
+      const uint8 = new Uint8Array(buffer);
+      sendDetailedProgress(id, 2, 4, '16-bit RAW / TIFF 디코딩', 60, 35);
+
+      const res = wasm_ingest_and_detect(fileName, uint8, params);
+      sendDetailedProgress(id, 3, 4, '다중 스케일 가우시안 차분(DoG) 탐지', 90, 70);
+
+      const previewOriginalBlob = base64ToBlob(res.previewJpgBase64, 'image/jpeg');
+      const vizBwEdgeBlob = base64ToBlob(res.vizEdgeJpgBase64, 'image/jpeg');
+      const maskAutoBlob = base64ToBlob(res.maskAutoPngBase64, 'image/jpeg');
+
+      fileNames.set(res.sessionId, fileName);
+      sendDetailedProgress(id, 4, 4, '다크룸 캔버스 인코딩 완료', 100, 100);
+
+      self.postMessage({
+        id,
+        ok: true,
+        data: {
+          sessionId: res.sessionId,
+          meta: res.meta,
+          detection: res.detection,
+          blobs: {
+            previewOriginalBlob,
+            vizBwEdgeBlob,
+            maskAutoBlob,
+          },
+        },
+      });
       return;
     }
 
     if (action === 'detect') {
       const { sessionId, params } = payload;
-      sendProgress(id, 5, '먼지 분석 준비 중');
-      const session = sessions.get(sessionId);
-      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+      sendProgress(id, 20, '다중 스케일 DoG 먼지 탐지 중');
 
-      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 10, '다중 스케일 가우시안 차분(DoG) 탐지 시작');
-      const { detectionResult, vizBwEdgeRgb8, maskAutoU8 } = detectSensorDustLocal(
-        session.detGray,
-        workWidth,
-        workHeight,
-        fullWidth,
-        fullHeight,
-        workWidth,
-        workHeight,
-        workScale,
-        params,
-        (detPct, detLabel) => {
-          const mapped = Math.round(10 + (detPct / 100) * 80); // 10% ~ 90%
-          sendProgress(id, mapped, detLabel);
-        }
-      );
-      session.lastDetection = detectionResult;
+      const res = wasm_detect(sessionId, params);
+      sendProgress(id, 85, '미리보기 캔버스 인코딩 중');
 
-      sendProgress(id, 92, '미리보기 캔버스 인코딩 중');
-      const [vizBwEdgeBlob, maskAutoBlob] = await Promise.all([
-        encodeRgb8ToBlob(vizBwEdgeRgb8, workWidth, workHeight, 'image/jpeg', 0.92),
-        encodeMaskU8ToBlob(maskAutoU8, workWidth, workHeight),
-      ]);
+      const vizBwEdgeBlob = base64ToBlob(res.vizEdgeJpgBase64, 'image/jpeg');
+      const maskAutoBlob = base64ToBlob(res.maskAutoPngBase64, 'image/jpeg');
 
       sendProgress(id, 100, '먼지 분석 완료');
       self.postMessage({
         id,
         ok: true,
         data: {
-          detection: detectionResult,
+          detection: res.detection,
           blobs: { vizBwEdgeBlob, maskAutoBlob },
         },
       });
@@ -393,51 +166,41 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 5, '마스크 오버레이 및 ROI 클러스터 분석 중');
-      const session = sessions.get(sessionId);
-      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
+      sendProgress(id, 20, '16-bit 센서 CFA 4단계 인페인팅 연산 중');
+      const res = wasm_inpaint(sessionId, {
+        spots: spots || [],
+        manual_strokes: manualStrokes || [],
+        inpaint_radius: inpaintRadius,
+        preserve_grain: preserveGrain,
+      });
 
-      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 10, '16-bit 증분 체크포인트 복원 중');
-      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult, checkpoint } =
-        inpaint16BitAndCameraRgbLocal(
-          session.origRgb8,
-          session.linear16,
-          fullWidth,
-          fullHeight,
-          workWidth,
-          workHeight,
-          workScale,
-          spots || [],
-          manualStrokes || [],
-          inpaintRadius,
-          preserveGrain,
-          (inpaintPct, inpaintLabel) => {
-            const mapped = Math.round(10 + (inpaintPct / 100) * 80); // 10% ~ 90%
-            sendProgress(id, mapped, inpaintLabel);
-          },
-          session.checkpoint
-        );
-
-      session.healedRgb8 = healedRgb8;
-      session.healedLinear16 = healedLinear16;
-      session.checkpoint = checkpoint;
-
-      sendProgress(id, 92, '복원 미리보기 캔버스 인코딩 중');
-      const [previewInpaintedBlob, maskFinalBlob] = await Promise.all([
-        encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
-        encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
-      ]);
+      sendProgress(id, 90, '복원 미리보기 인코딩 중');
+      const previewInpaintedBlob = base64ToBlob(res.previewHealedBase64, 'image/jpeg');
+      const maskFinalBlob = base64ToBlob(res.maskFinalPngBase64, 'image/jpeg');
 
       sendProgress(id, 100, '복원 완료');
       self.postMessage({
         id,
         ok: true,
         data: {
-          inpaintResult,
+          inpaintResult: res.result,
           blobs: { previewInpaintedBlob, maskFinalBlob },
         },
       });
+      return;
+    }
+
+    if (action === 'render_tile') {
+      const { sessionId, layer, level, tx, ty } = payload;
+      const tileBytes = wasm_render_tile(sessionId, layer, level, tx, ty);
+      self.postMessage(
+        {
+          id,
+          ok: true,
+          data: { tileBytes },
+        },
+        [tileBytes.buffer]
+      );
       return;
     }
 
@@ -452,7 +215,7 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain,
       }: {
         sessionId: string;
-        format: 'dng' | 'tiff16' | 'png' | 'jpg';
+        format: 'dng' | 'tiff16' | 'png' | 'jpg' | 'xmp';
         colorSpace?: ColorSpaceId;
         spots: DetectedDustSpot[];
         manualStrokes: ManualBrushStroke[];
@@ -460,56 +223,45 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 5, '원본 해상도 내보내기 준비');
-      const session = sessions.get(sessionId);
-      if (!session) throw new Error('세션 데이터를 찾을 수 없습니다. 사진을 다시 불러와 주세요.');
-      assertExportFormatAllowed(session, format);
-
-      const { fullWidth, fullHeight, workWidth, workHeight, workScale } = session.meta;
-      sendProgress(id, 15, '임시 저장본 확인 및 1:1 버퍼 검증 중');
-      const { healedRgb8, healedLinear16, workHealedRgb8, workMaskU8, inpaintResult, checkpoint } =
-        inpaint16BitAndCameraRgbLocal(
-          session.origRgb8,
-          session.linear16,
-          fullWidth,
-          fullHeight,
-          workWidth,
-          workHeight,
-          workScale,
-          spots || [],
-          manualStrokes || [],
-          inpaintRadius,
-          preserveGrain,
-          (inpaintPct, inpaintLabel) => {
-            const mapped = Math.round(15 + (inpaintPct / 100) * 50); // 15% ~ 65%
-            sendProgress(id, mapped, inpaintLabel);
-          },
-          session.checkpoint
-        );
-
-      session.healedRgb8 = healedRgb8;
-      session.healedLinear16 = healedLinear16;
-      session.checkpoint = checkpoint;
+      sendProgress(id, 20, '16-bit CFA 복원 및 검증 중');
+      const inpaintRes = wasm_inpaint(sessionId, {
+        spots: spots || [],
+        manual_strokes: manualStrokes || [],
+        inpaint_radius: inpaintRadius,
+        preserve_grain: preserveGrain,
+      });
 
       sendProgress(id, 70, `${format.toUpperCase()} 파일 인코딩 중`);
-      const [{ blob: fileBlob, ext }, previewInpaintedBlob, maskFinalBlob] = await Promise.all([
-        renderExportBuffer(session, format, healedRgb8, healedLinear16, colorSpace),
-        encodeRgb8ToBlob(workHealedRgb8, workWidth, workHeight, 'image/jpeg', 0.96),
-        encodeMaskU8ToBlob(workMaskU8, workWidth, workHeight),
-      ]);
+      const fileBytes = wasm_export_file(sessionId, format, colorSpace);
 
-      const origBase = session.meta.originalFileName.replace(/\.[^/.]+$/, '');
+      const mimeType =
+        format === 'dng'
+          ? 'image/x-adobe-dng'
+          : format === 'tiff16'
+          ? 'image/tiff'
+          : format === 'png'
+          ? 'image/png'
+          : format === 'xmp'
+          ? 'application/xml'
+          : 'image/jpeg';
+
+      const ext = format === 'tiff16' ? 'tiff' : format === 'xmp' ? 'xmp' : format;
+      const origFileName = fileNames.get(sessionId) || 'image';
+      const origBase = origFileName.replace(/\.[^/.]+$/, '');
       const downloadName = `${origBase}_cleaned.${ext}`;
 
-      sendProgress(id, 100, '내보내기 완료');
+      const fileBlob = new Blob([fileBytes as unknown as BlobPart], { type: mimeType });
+      const previewInpaintedBlob = base64ToBlob(inpaintRes.previewHealedBase64, 'image/jpeg');
+      const maskFinalBlob = base64ToBlob(inpaintRes.maskFinalPngBase64, 'image/jpeg');
 
+      sendProgress(id, 100, '내보내기 완료');
       self.postMessage({
         id,
         ok: true,
         data: {
           fileBlob,
           downloadName,
-          inpaintResult,
+          inpaintResult: inpaintRes.result,
           blobs: { previewInpaintedBlob, maskFinalBlob },
         },
       });
@@ -529,36 +281,31 @@ self.onmessage = async (event: MessageEvent) => {
       const total = files.length;
       for (let i = 0; i < total; i++) {
         const f = files[i];
-        const basePct = Math.round((i / total) * 90);
-        sendProgress(id, basePct, `연속 사진 [${i + 1}/${total}] ${f.fileName} 불러오는 중`);
-        const res = await processSingleIngestAndDetect(id, f.sessionId, f.fileName, f.buffer, params);
-        processedList.push(res);
+        sendProgress(id, Math.round((i / total) * 90), `연속 사진 [${i + 1}/${total}] ${f.fileName} 불러오는 중`);
+        const uint8 = new Uint8Array(f.buffer);
+        const res = wasm_ingest_and_detect(f.fileName, uint8, params);
+        fileNames.set(res.sessionId, f.fileName);
+
+        const previewOriginalBlob = base64ToBlob(res.previewJpgBase64, 'image/jpeg');
+        const vizBwEdgeBlob = base64ToBlob(res.vizEdgeJpgBase64, 'image/jpeg');
+        const maskAutoBlob = base64ToBlob(res.maskAutoPngBase64, 'image/jpeg');
+
+        processedList.push({
+          sessionId: res.sessionId,
+          meta: res.meta,
+          detection: res.detection,
+          blobs: { previewOriginalBlob, vizBwEdgeBlob, maskAutoBlob },
+        });
       }
 
-      sendProgress(id, 92, '다중 프레임 센서 먼지 상호 교차 클러스터링 중');
-      const multiReport = runMultiFrameClustering(
-        processedList.map((p) => ({
-          sessionId: p.sessionId,
-          originalFileName: p.meta.originalFileName,
-          workScale: p.meta.workScale,
-          spots: p.detection.spots,
-        })),
-        14.0,
-        2
-      );
-
-      for (const p of processedList) {
-        const pf = multiReport.perFrame.find((f) => f.sessionId === p.sessionId);
-        if (pf) {
-          p.detection = {
-            ...p.detection,
-            spots: pf.spots,
-            totalDetected: pf.totalDetected,
-          };
-          const sess = sessions.get(p.sessionId);
-          if (sess) sess.lastDetection = p.detection;
-        }
-      }
+      sendProgress(id, 92, '다중 프레임 불변 센서 먼지 교차 매칭 중');
+      const sessionIds = processedList.map((p) => p.sessionId);
+      const multiReport = wasm_multi_detect({
+        session_dirs: sessionIds,
+        tolerance_px: 14.0,
+        min_frames_match: 2,
+        default_method: params.method || 'dual',
+      });
 
       sendProgress(id, 100, '연속 사진 로딩 및 교차 분석 완료');
       self.postMessage({
@@ -585,46 +332,20 @@ self.onmessage = async (event: MessageEvent) => {
         minFramesMatch?: number;
       } = payload;
 
-      const frameInputs = [];
-      const total = sessionIds.length;
-      for (let i = 0; i < total; i++) {
-        const sid = sessionIds[i];
-        const sess = sessions.get(sid);
-        if (!sess) continue;
-
-        const frameStartPct = Math.round((i / total) * 90);
-        const frameEndPct = Math.round(((i + 1) / total) * 90);
-        sendProgress(id, frameStartPct, `연속 사진 [${i + 1}/${total}] ${sess.meta.originalFileName} 분석 중`);
-
-        const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
-        const { detectionResult } = detectSensorDustLocal(
-          sess.detGray,
-          workWidth,
-          workHeight,
-          fullWidth,
-          fullHeight,
-          workWidth,
-          workHeight,
-          workScale,
-          params,
-          (detPct, detLabel) => {
-            const currentPct = Math.round(frameStartPct + (detPct / 100) * (frameEndPct - frameStartPct));
-            sendProgress(id, currentPct, `[${i + 1}/${total}] ${detLabel}`);
-          }
-        );
-        sess.lastDetection = detectionResult;
-        frameInputs.push({
-          sessionId: sid,
-          originalFileName: sess.meta.originalFileName,
-          workScale,
-          spots: detectionResult.spots,
-        });
+      sendProgress(id, 20, '연속 사진 다중 프레임 재분석 중');
+      for (const sid of sessionIds) {
+        wasm_detect(sid, params);
       }
 
-      sendProgress(id, 92, '다중 프레임 불변 센서 먼지 교차 매칭 중');
-      const multiReport = runMultiFrameClustering(frameInputs, tolerancePx, minFramesMatch);
-      sendProgress(id, 100, '연속 사진 재분석 완료');
+      sendProgress(id, 75, '센서 불변 먼지 클러스터링 계산 중');
+      const multiReport = wasm_multi_detect({
+        session_dirs: sessionIds,
+        tolerance_px: tolerancePx,
+        min_frames_match: minFramesMatch,
+        default_method: params.method || 'dual',
+      });
 
+      sendProgress(id, 100, '연속 사진 재분석 완료');
       self.postMessage({
         id,
         ok: true,
@@ -645,65 +366,38 @@ self.onmessage = async (event: MessageEvent) => {
           manualStrokes: ManualBrushStroke[];
           params: DetectionParams;
         }>;
-        format: 'dng' | 'tiff16' | 'png' | 'jpg';
+        format: 'dng' | 'tiff16' | 'png' | 'jpg' | 'xmp';
         colorSpace?: ColorSpaceId;
       } = payload;
 
       const zipEntries: Array<{ name: string; data: Uint8Array }> = [];
       const total = items.length;
-      for (const it of items) {
-        const sess = sessions.get(it.sessionId);
-        if (sess) assertExportFormatAllowed(sess, format);
-      }
+
       for (let i = 0; i < total; i++) {
         const it = items[i];
-        const sess = sessions.get(it.sessionId);
-        if (!sess) continue;
+        const stepPct = Math.round((i / total) * 90);
+        sendProgress(id, stepPct, `배치 [${i + 1}/${total}] 복원 및 ${format.toUpperCase()} 인코딩 중`);
 
-        const frameStartPct = Math.round((i / total) * 90);
-        const frameEndPct = Math.round(((i + 1) / total) * 90);
-        sendProgress(id, frameStartPct, `배치 [${i + 1}/${total}] ${sess.meta.originalFileName} 복원 중`);
+        wasm_inpaint(it.sessionId, {
+          spots: it.spots || [],
+          manual_strokes: it.manualStrokes || [],
+          inpaint_radius: it.params?.inpaintRadius ?? 6,
+          preserve_grain: it.params?.preserveGrain ?? true,
+        });
 
-        const { fullWidth, fullHeight, workWidth, workHeight, workScale } = sess.meta;
-
-        const { healedRgb8, healedLinear16, checkpoint } = inpaint16BitAndCameraRgbLocal(
-          sess.origRgb8,
-          sess.linear16,
-          fullWidth,
-          fullHeight,
-          workWidth,
-          workHeight,
-          workScale,
-          it.spots || [],
-          it.manualStrokes || [],
-          it.params?.inpaintRadius ?? 6,
-          it.params?.preserveGrain ?? true,
-          (inpaintPct, inpaintLabel) => {
-            const currentPct = Math.round(frameStartPct + (inpaintPct / 100) * (frameEndPct - frameStartPct) * 0.7);
-            sendProgress(id, currentPct, `배치 [${i + 1}/${total}] ${inpaintLabel}`);
-          },
-          sess.checkpoint
-        );
-        sess.checkpoint = checkpoint;
-
-        sendProgress(id, Math.round(frameStartPct + (frameEndPct - frameStartPct) * 0.75), `배치 [${i + 1}/${total}] ${format.toUpperCase()} 인코딩 중`);
-        const { blob, ext } = await renderExportBuffer(
-          sess,
-          format,
-          healedRgb8,
-          healedLinear16,
-          colorSpace
-        );
-        const arrBuf = await blob.arrayBuffer();
-        const origBase = sess.meta.originalFileName.replace(/\.[^/.]+$/, '');
+        const fileBytes = wasm_export_file(it.sessionId, format, colorSpace);
+        const origFileName = fileNames.get(it.sessionId) || `image_${i + 1}`;
+        const origBase = origFileName.replace(/\.[^/.]+$/, '');
+        const ext = format === 'tiff16' ? 'tiff' : format === 'xmp' ? 'xmp' : format;
         const entryName = `${String(i + 1).padStart(2, '0')}_${origBase}_cleaned.${ext}`;
-        zipEntries.push({ name: entryName, data: new Uint8Array(arrBuf) });
+        zipEntries.push({ name: entryName, data: fileBytes });
       }
 
       sendProgress(id, 94, 'ZIP 압축 아카이브 생성 중');
       const zipBlob = buildZipArchiveBlob(zipEntries);
       const downloadName = `SensorClean_Batch_${format.toUpperCase()}.zip`;
       sendProgress(id, 100, '배치 내보내기 완료');
+
       self.postMessage({
         id,
         ok: true,
@@ -712,6 +406,21 @@ self.onmessage = async (event: MessageEvent) => {
           downloadName,
         },
       });
+      return;
+    }
+
+    if (action === 'cancel') {
+      const { sessionId } = payload;
+      const canceled = wasm_cancel_session(sessionId);
+      self.postMessage({ id, ok: true, data: { canceled } });
+      return;
+    }
+
+    if (action === 'drop') {
+      const { sessionId } = payload;
+      fileNames.delete(sessionId);
+      const dropped = wasm_drop_session(sessionId);
+      self.postMessage({ id, ok: true, data: { dropped } });
       return;
     }
 

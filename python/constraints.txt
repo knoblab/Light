@@ -1,7 +1,0 @@
-# Versions the engine is tested against (Python 3.12, Windows x64).
-# Applied with: pip install -r requirements.txt -c constraints.txt
-numpy==2.5.4
-opencv-python-headless==4.14.0.94
-piexif==1.1.3
-rawpy==0.28.0
-tifffile==2026.10.15
