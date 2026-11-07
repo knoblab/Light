@@ -1,0 +1,16 @@
+{
+  "name": "sc-wasm",
+  "type": "module",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "sc_wasm_bg.wasm",
+    "sc_wasm.js",
+    "sc_wasm.d.ts"
+  ],
+  "main": "sc_wasm.js",
+  "types": "sc_wasm.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

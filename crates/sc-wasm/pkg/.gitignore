@@ -1,0 +1,6 @@
+# Allow wasm artifacts for frontend bundling in CI/Cloudflare
+!package.json
+!sc_wasm.js
+!sc_wasm.d.ts
+!sc_wasm_bg.wasm
+!sc_wasm_bg.wasm.d.ts
