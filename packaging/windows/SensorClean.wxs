@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="SensorClean Pro" Language="1033" Version="0.1.0" Manufacturer="KnobLab" UpgradeCode="CA627124-1C67-4A12-ACF5-0AC15F76E82F">
+    <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+    <MediaTemplate EmbedCab="yes" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="SensorClean Pro">
+          <Component Id="MainExecutable" Guid="3F27AE05-8D63-4DC1-8302-3905D2D5B8D2" Win64="yes">
+            <File Id="SensorCleanExe" Source="target/x86_64-pc-windows-gnu/release/SensorClean.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="CliExecutable" Guid="D2B6DF48-0C82-4E5C-A77E-F09C2E19CD8B" Win64="yes">
+            <File Id="SensorCleanCliExe" Source="target/x86_64-pc-windows-gnu/release/sensorclean.exe" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="SensorClean Pro">
+          <Component Id="ApplicationShortcut" Guid="7BB85601-5259-4D39-A512-58A21C0DE7A9">
+            <Shortcut Id="ApplicationStartMenuShortcut" Name="SensorClean Pro" Description="Pure-Rust Native Sensor Dust Removal" Target="[#SensorCleanExe]" WorkingDirectory="INSTALLFOLDER" />
+            <RemoveFolder Id="CleanUpShortCut" On="uninstall" />
+            <RegistryValue Root="HKCU" Key="Software\KnobLab\SensorClean" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+    <Feature Id="MainApplication" Title="SensorClean Pro" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="CliExecutable" />
+      <ComponentRef Id="ApplicationShortcut" />
+    </Feature>
+  </Product>
+</Wix>

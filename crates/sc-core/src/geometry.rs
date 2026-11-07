@@ -66,7 +66,13 @@ pub enum Orientation {
     Rotate270Cw = 8,
 }
 
+#[allow(non_upper_case_globals)]
 impl Orientation {
+    pub const FlipH: Self = Self::FlipHorizontal;
+    pub const FlipV: Self = Self::FlipVertical;
+    pub const Rotate90: Self = Self::Rotate90Cw;
+    pub const Rotate270: Self = Self::Rotate270Cw;
+
     pub fn from_exif(code: u16) -> Self {
         match code {
             2 => Self::FlipHorizontal,
@@ -84,12 +90,66 @@ impl Orientation {
         self as u16
     }
 
+    /// Decompose into `(flip_horizontal, quarter_turns_cw)`.
+    pub fn to_parts(self) -> (bool, u8) {
+        match self {
+            Self::Normal => (false, 0),
+            Self::Rotate90Cw => (false, 1),
+            Self::Rotate180 => (false, 2),
+            Self::Rotate270Cw => (false, 3),
+            Self::FlipHorizontal => (true, 0),
+            Self::Transverse => (true, 1),
+            Self::FlipVertical => (true, 2),
+            Self::Transpose => (true, 3),
+        }
+    }
+
+    pub fn from_parts(flip: bool, quarter_turns_cw: u8) -> Self {
+        match (flip, quarter_turns_cw % 4) {
+            (false, 0) => Self::Normal,
+            (false, 1) => Self::Rotate90Cw,
+            (false, 2) => Self::Rotate180,
+            (false, _) => Self::Rotate270Cw,
+            (true, 0) => Self::FlipHorizontal,
+            (true, 1) => Self::Transverse,
+            (true, 2) => Self::FlipVertical,
+            (true, _) => Self::Transpose,
+        }
+    }
+
     /// Whether the orientation swaps width and height.
     pub fn swaps_axes(self) -> bool {
         matches!(
             self,
             Self::Transpose | Self::Rotate90Cw | Self::Transverse | Self::Rotate270Cw
         )
+    }
+
+    /// Inverse orientation.
+    pub fn inverse(self) -> Self {
+        match self {
+            Self::Rotate90Cw => Self::Rotate270Cw,
+            Self::Rotate270Cw => Self::Rotate90Cw,
+            other => other,
+        }
+    }
+
+    /// Map a point in stored pixel space (w x h) to oriented space.
+    pub fn map(self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
+        let (flip, t) = self.to_parts();
+        let (mut x, y2, mut w2, mut h2) = (x, y, w, h);
+        if flip {
+            x = w2 - x;
+        }
+        let mut y = y2;
+        for _ in 0..t {
+            let nx = h2 - y;
+            let ny = x;
+            x = nx;
+            y = ny;
+            std::mem::swap(&mut w2, &mut h2);
+        }
+        (x, y)
     }
 
     /// Dimensions `(width, height)` after applying orientation to `(w, h)`.

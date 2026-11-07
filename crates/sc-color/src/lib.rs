@@ -11,8 +11,15 @@
     clippy::unreachable
 )]
 
+pub mod cct;
 pub mod icc;
 pub mod spaces;
+pub mod transfer;
+
+pub use spaces::{
+    ADOBE_RGB, BRADFORD, ColorSpace, D50, D65, DISPLAY_P3, LUMA_709, LUMA_2020, Mat3, PROPHOTO,
+    REC2020, RgbSpace, SRGB, WORKING, Xy, bradford, luminance_2020,
+};
 
 use rayon::prelude::*;
 

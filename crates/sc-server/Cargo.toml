@@ -26,4 +26,4 @@ zip = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 image = { workspace = true }
-lightcraft-tiff = { workspace = true }
+sc-tiff = { path = "../sc-tiff" }

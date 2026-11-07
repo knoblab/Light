@@ -2,8 +2,8 @@
 //! matching `inpaint_16bit_linear` and `export_healed_image` in `python/raw_pipeline.py:1023-1609`.
 
 use crate::npy::{read_npy_u8, read_npy_u16, write_npy_u16};
-use lightcraft_tiff::tags::{self as t, compression, photometric};
-use lightcraft_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
+use sc_tiff::tags::{self as t, compression, photometric};
+use sc_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
 use sc_color::{
     build_srgb_u8_lut, linear_16bit_to_srgb_8bit, linear_16bit_to_srgb_16bit, median_f32,
     percentile_f32,
@@ -664,7 +664,7 @@ fn extract_mask_bboxes(mask: &[u8], w: usize, h: usize) -> Vec<(usize, usize, us
     boxes
 }
 
-/// Writes a 16-bit RGB TIFF (`tiff16`) or LinearRaw DNG (`dng`) using `lightcraft-tiff`.
+/// Writes a 16-bit RGB TIFF (`tiff16`) or LinearRaw DNG (`dng`) using `sc-tiff`.
 fn write_tiff16_rgb(path: &Path, rgb16: &[u16], w: usize, h: usize, is_dng: bool, meta: &SessionMetadata) -> Result<()> {
     let mut ifd = IfdBuilder::new();
     ifd.set(t::IMAGE_WIDTH, Value::Long(vec![w as u32]));

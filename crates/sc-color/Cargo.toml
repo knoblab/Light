@@ -7,4 +7,5 @@ description = "SensorClean color pipeline: 16-bit linear LUTs, sRGB tone-mapping
 
 [dependencies]
 rayon = { workspace = true }
+serde = { workspace = true }
 sc-core = { path = "../sc-core" }

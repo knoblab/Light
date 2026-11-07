@@ -10,9 +10,6 @@ sc-imgproc = { path = "../sc-imgproc" }
 sc-color = { path = "../sc-color" }
 sc-detect = { path = "../sc-detect" }
 
-lightcraft-raw = { workspace = true }
-lightcraft-raster = { workspace = true }
-
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -9,11 +9,8 @@ sc-core = { path = "../sc-core" }
 sc-color = { path = "../sc-color" }
 sc-heal = { path = "../sc-heal" }
 
-lightcraft-raw = { workspace = true }
-lightcraft-tiff = { workspace = true }
-lightcraft-meta = { workspace = true }
-lightcraft-color = { workspace = true }
-lightcraft-raster = { workspace = true }
+sc-tiff = { path = "../sc-tiff" }
+sc-raw = { path = "../sc-raw" }
 
 image = { workspace = true }
 png = { workspace = true }

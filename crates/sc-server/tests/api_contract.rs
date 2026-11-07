@@ -4,8 +4,8 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
 };
-use lightcraft_tiff::tags::{self as t, compression, photometric};
-use lightcraft_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value as TiffVal};
+use sc_tiff::tags::{self as t, compression, photometric};
+use sc_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value as TiffVal};
 use sc_server::{AppState, build_app};
 use sc_session::SessionStore;
 use serde_json::Value;

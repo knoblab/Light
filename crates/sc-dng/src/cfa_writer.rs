@@ -1,12 +1,12 @@
-//! Pure-Rust CFA DNG 1.6 Writer using `lightcraft-tiff`.
+//! Pure-Rust CFA DNG 1.6 Writer using `sc-tiff`.
 //!
 //! Writes non-demosaiced CFA sensor RAW data into standards-compliant DNG 1.6 files
 //! with full camera color matrices, black/white levels, and metadata preservation.
 
 #![forbid(unsafe_code)]
 
-use lightcraft_tiff::tags::{self as t, compression, photometric};
-use lightcraft_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
+use sc_tiff::tags::{self as t, compression, photometric};
+use sc_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
 use sc_core::{Result, ScError, SessionMetadata};
 use std::path::Path;
 

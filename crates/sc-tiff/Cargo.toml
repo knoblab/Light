@@ -1,0 +1,13 @@
+[package]
+name = "sc-tiff"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean pure-Rust TIFF 6.0 / BigTIFF / DNG 1.6 IFD reader and writer"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

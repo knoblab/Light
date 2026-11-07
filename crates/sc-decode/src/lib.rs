@@ -1,6 +1,6 @@
 //! SensorClean RAW and ordinary image decoder + CFA DNG roundtrip writer (`sc-decode`).
 //!
-//! - Uses pure-Rust `lightcraft-raw` for CFA RAW decoding and lossless LJ92 / uncompressed CFA DNG writing.
+//! - Uses pure-Rust `sc-raw` for CFA RAW decoding and lossless LJ92 / uncompressed CFA DNG writing.
 //! - Wraps all untrusted file parsing in `std::panic::catch_unwind` so a corrupt file can never crash a worker.
 //! - Enforces Phase 0 safety invariants:
 //!   1. Never mistakes a 1-channel Bayer mosaic TIFF for a grayscale image (`test_single_channel_mosaic_is_rejected`).
@@ -17,8 +17,8 @@
 )]
 
 use image::{DynamicImage, GenericImageView};
-use lightcraft_color::{D65, REC2020, SRGB, bradford};
-use lightcraft_raw::{
+use sc_color::{D65, REC2020, SRGB, bradford};
+use sc_raw::{
     DngCompression, DngWriteOptions, Method, RawData, RawImage,
     color::{as_shot_white_xy, camera_to_rec2020, wb_multipliers},
     embedded_preview, write_dng,
@@ -46,9 +46,9 @@ pub fn is_raw_extension(ext_lower: &str) -> bool {
     RAW_EXTENSIONS.contains(&clean)
 }
 
-/// Decodes a RAW file into a `lightcraft_raw::RawImage` inside a `catch_unwind` isolation boundary.
+/// Decodes a RAW file into a `sc_raw::RawImage` inside a `catch_unwind` isolation boundary.
 pub fn decode_raw_isolated(bytes: &[u8]) -> Result<RawImage> {
-    let res = catch_unwind(AssertUnwindSafe(|| lightcraft_raw::decode(bytes)));
+    let res = catch_unwind(AssertUnwindSafe(|| sc_raw::decode(bytes)));
     match res {
         Ok(Ok(raw)) => Ok(raw),
         Ok(Err(e)) => Err(ScError::CorruptInput(format!(
@@ -117,8 +117,8 @@ pub struct IngestedSessionData {
     pub det_gray: Vec<f32>,
 }
 
-fn convert_orientation(o: lightcraft_geom::Orientation) -> Orientation {
-    Orientation::from_exif(o.to_exif())
+fn convert_orientation(o: Orientation) -> Orientation {
+    o
 }
 
 fn orient_rgb_u16(src: &[u16], w: usize, h: usize, orient: Orientation) -> (Vec<u16>, usize, usize) {
@@ -153,7 +153,7 @@ fn extract_exif_from_raw(raw: &RawImage) -> ExifMetadata {
     });
     let focal_length = m.focal_length.map(|fl| format!("{:.1}mm", fl));
     let f_number = m.f_number.map(|fn_val| (fn_val * 10.0).round() / 10.0);
-    let date_time = m.capture_time.as_ref().map(|dt| dt.to_exif());
+    let date_time = m.capture_time.clone();
 
     ExifMetadata {
         make: m.make.clone().unwrap_or_else(|| "Unknown".into()),
@@ -170,7 +170,7 @@ fn extract_exif_from_raw(raw: &RawImage) -> ExifMetadata {
 
 fn extract_exif_from_bytes(bytes: &[u8]) -> ExifMetadata {
     let mut meta = ExifMetadata::default();
-    if let Ok(m) = catch_unwind(AssertUnwindSafe(|| lightcraft_meta::extract(bytes))) {
+    if let Ok(m) = catch_unwind(AssertUnwindSafe(|| sc_raw::meta::extract(bytes))) {
         if let Some(make) = m.make.filter(|s| !s.is_empty()) {
             meta.make = make;
         }
@@ -187,7 +187,7 @@ fn extract_exif_from_bytes(bytes: &[u8]) -> ExifMetadata {
             }
         });
         meta.focal_length = m.focal_length.map(|fl| format!("{:.1}mm", fl));
-        meta.date_time = m.capture_time.as_ref().map(|dt| dt.to_exif());
+        meta.date_time = m.capture_time.clone();
     }
     meta
 }
@@ -275,14 +275,14 @@ fn decode_raw_tiff_fallback(
     bytes: &[u8],
     raw_err: &ScError,
 ) -> Result<(Vec<u16>, usize, usize, DecodeKind, Option<f64>)> {
-    let tiff = lightcraft_tiff::Tiff::parse(bytes)
+    let tiff = sc_tiff::Tiff::parse(bytes)
         .map_err(|_| ScError::CorruptInput(format!("RAW 파일을 디코딩할 수 없습니다 ({raw_err})")))?;
     let ifd0 = tiff
         .ifds
         .first()
         .ok_or_else(|| ScError::CorruptInput(format!("TIFF IFD0 없음 ({raw_err})")))?;
     let spp = ifd0
-        .u16(lightcraft_tiff::tags::SAMPLES_PER_PIXEL)
+        .u16(sc_tiff::tags::SAMPLES_PER_PIXEL)
         .unwrap_or(1);
     if spp < 3 {
         return Err(ScError::UnsupportedFormat(format!(

@@ -1,0 +1,22 @@
+[package]
+name = "sc-raw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean pure-Rust CFA RAW decoder, demosaicing, LJ92, and DNG writer"
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-color = { path = "../sc-color" }
+sc-tiff = { path = "../sc-tiff" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+miniz_oxide = "0.8"
+zune-core = "0.5"
+zune-jpeg = "0.5"
+jpeg-encoder = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+sha2 = "0.10"

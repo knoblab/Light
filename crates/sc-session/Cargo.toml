@@ -8,7 +8,7 @@ description = "SensorClean session store (memmap2 NPY storage, TTL/owner isolati
 [dependencies]
 image = { workspace = true }
 jpeg-encoder = { workspace = true }
-lightcraft-tiff = { workspace = true }
+sc-tiff = { path = "../sc-tiff" }
 memmap2 = { workspace = true }
 png = { workspace = true }
 rayon = { workspace = true }

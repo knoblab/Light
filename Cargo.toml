@@ -4,6 +4,8 @@ members = [
     "crates/sc-core",
     "crates/sc-imgproc",
     "crates/sc-color",
+    "crates/sc-tiff",
+    "crates/sc-raw",
     "crates/sc-detect",
     "crates/sc-decode",
     "crates/sc-session",
@@ -13,6 +15,7 @@ members = [
     "crates/sc-cli",
     "crates/sc-wasm",
     "crates/sc-tauri",
+    "crates/sc-gui",
 ]
 
 [workspace.package]
@@ -21,12 +24,6 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-lightcraft-raw = { path = "../../lightcraft/crates/raw", default-features = false }
-lightcraft-tiff = { path = "../../lightcraft/crates/tiff" }
-lightcraft-meta = { path = "../../lightcraft/crates/meta" }
-lightcraft-color = { path = "../../lightcraft/crates/color" }
-lightcraft-raster = { path = "../../lightcraft/crates/raster" }
-lightcraft-geom = { path = "../../lightcraft/crates/geom" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

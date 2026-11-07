@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use lightcraft_tiff::tags::{self as t, compression, photometric};
-use lightcraft_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
+use sc_tiff::tags::{self as t, compression, photometric};
+use sc_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value};
 use sc_color::icc::generate_icc_profile;
 use sc_color::spaces::ColorSpace;
 use sc_core::{Result, ScError, SessionMetadata};

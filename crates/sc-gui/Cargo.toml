@@ -1,0 +1,27 @@
+[package]
+name = "sc-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SensorClean pure native desktop application (eframe/egui + OpenGL, zero WebView)"
+
+[[bin]]
+name = "SensorClean"
+path = "src/main.rs"
+
+[dependencies]
+sc-core = { path = "../sc-core" }
+sc-color = { path = "../sc-color" }
+sc-imgproc = { path = "../sc-imgproc" }
+sc-detect = { path = "../sc-detect" }
+sc-decode = { path = "../sc-decode" }
+sc-dng = { path = "../sc-dng" }
+sc-heal = { path = "../sc-heal" }
+sc-session = { path = "../sc-session" }
+
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11"] }
+rfd = "0.15"
+image = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,9 +1,9 @@
-use lightcraft_raw::{BlackLevel, Cfa, ColorData, OpcodeLists, RawData, RawFormat, RawImage, Rect};
-use lightcraft_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value, tags as t};
 use sc_core::DecodeKind;
 use sc_decode::{
     decode_raw_isolated, ingest_bytes, raw_pixels_u16, raw_pixels_u16_mut, write_cfa_dng_isolated,
 };
+use sc_raw::{BlackLevel, Cfa, ColorData, OpcodeLists, RawData, RawFormat, RawImage, Rect};
+use sc_tiff::{ByteOrder, IfdBuilder, ImageData, TiffWriter, Value, tags as t};
 use std::path::Path;
 use std::time::Instant;
 
@@ -28,13 +28,13 @@ fn make_synthetic_cfa_raw(w: usize, h: usize) -> RawImage {
         white: vec![4095.0],
         active_area: full,
         crop: full,
-        orientation: lightcraft_geom::Orientation::Normal,
+        orientation: sc_core::Orientation::Normal,
         color: ColorData::default(),
         wb_multipliers: Some([2.1, 1.0, 1.6]),
         linearized: true,
         pixel_aspect: 1.0,
         opcodes: OpcodeLists::default(),
-        metadata: lightcraft_meta::Metadata {
+        metadata: sc_raw::meta::Metadata {
             make: Some("Panasonic".into()),
             model: Some("DC-S5".into()),
             iso: Some(100),
