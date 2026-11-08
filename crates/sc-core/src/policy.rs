@@ -76,6 +76,7 @@ mod tests {
             bayer_pattern: "RGGB".into(),
             stats_16_bit: Stats16Bit::default(),
             exif: ExifMetadata::default(),
+            raw_crop: None,
         }
     }
 

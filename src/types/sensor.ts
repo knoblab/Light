@@ -98,8 +98,8 @@ export interface ExifMetadata {
 
 /**
  * What the pixel data of a session really is:
- *  - raw-linear16: true 16-bit linear sensor-derived RGB read from the file (e.g. linear DNG)
- *  - raw-developed: RAW developed to linear RGB by LibRaw (demosaiced, not the original CFA data)
+ *  - raw-linear16: true 16-bit linear sensor CFA mosaic data read from the RAW file
+ *  - raw-developed: demosaiced linear RGB image (e.g. pre-developed 3-channel linear DNG)
  *  - image-16bit / image-8bit: an ordinary image file (TIFF/PNG/JPEG), not RAW
  *  - embedded-preview: a RAW container whose sensor data could not be decoded; only the camera's
  *    embedded 8-bit preview JPEG was used
@@ -139,6 +139,7 @@ export interface SessionMetadata {
     estimatedDynamicRangeEv: number;
   };
   exif: ExifMetadata;
+  rawCrop?: [number, number, number, number];
 }
 
 export interface DetectionResult {

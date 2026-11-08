@@ -35,6 +35,8 @@ pub struct WasmSession {
     pub id: String,
     pub meta: SessionMetadata,
     pub raw_cfa: Option<Vec<u16>>,
+    pub cfa_width: usize,
+    pub cfa_height: usize,
     pub healed_cfa: Option<Vec<u16>>,
     pub linear_16bit: Vec<u16>,
     pub work_srgb_u8: Vec<u8>,
@@ -133,10 +135,14 @@ pub fn wasm_ingest_and_detect_core(
     );
     let det_result = det_output.result;
 
-    let raw_cfa = if let Some(ref raw) = ingested.raw_image {
-        raw_pixels_u16(raw).ok().map(|s| s.to_vec())
+    let (raw_cfa, cfa_w, cfa_h) = if let Some(ref raw) = ingested.raw_image {
+        (
+            raw_pixels_u16(raw).ok().map(|s| s.to_vec()),
+            raw.width,
+            raw.height,
+        )
     } else {
-        None
+        (None, fw, fh)
     };
 
     let mut jpeg_bytes = Vec::new();
@@ -160,6 +166,8 @@ pub fn wasm_ingest_and_detect_core(
         id: session_id.clone(),
         meta: meta.clone(),
         raw_cfa,
+        cfa_width: cfa_w,
+        cfa_height: cfa_h,
         healed_cfa: None,
         linear_16bit: ingested.linear_16bit,
         work_srgb_u8: ingested.work_srgb_u8,
@@ -257,12 +265,49 @@ pub fn wasm_inpaint_core(session_id: &str, params: InpaintParams) -> Result<Inpa
         let mut inpainted_pixels = 0usize;
 
         if let Some(ref cfa) = session.raw_cfa {
+            let (cw, ch) = (session.cfa_width, session.cfa_height);
+            let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = session.meta.raw_crop {
+                (cx, cy)
+            } else if cw > fw && ch > fh {
+                (((cw - fw) / 2) & !1, ((ch - fh) / 2) & !1)
+            } else {
+                (0, 0)
+            };
+            let cfa_spots: Vec<DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
+                spots_to_heal
+                    .iter()
+                    .map(|s| {
+                        let mut s2 = s.clone();
+                        s2.cx += crop_x as f64;
+                        s2.cy += crop_y as f64;
+                        s2
+                    })
+                    .collect()
+            } else {
+                spots_to_heal.to_vec()
+            };
+            let cfa_strokes: Vec<ManualBrushStroke> = if crop_x > 0 || crop_y > 0 {
+                params
+                    .manual_strokes
+                    .iter()
+                    .map(|st| {
+                        let mut st2 = st.clone();
+                        for pt in &mut st2.points {
+                            pt.x += crop_x as f64;
+                            pt.y += crop_y as f64;
+                        }
+                        st2
+                    })
+                    .collect()
+            } else {
+                params.manual_strokes.clone()
+            };
             let (healed, modified_count) = heal_cfa_image_cancellable(
                 cfa,
-                fw,
-                fh,
-                spots_to_heal,
-                &params.manual_strokes,
+                cw,
+                ch,
+                &cfa_spots,
+                &cfa_strokes,
                 pattern,
                 params.inpaint_radius,
                 params.preserve_grain,
@@ -449,7 +494,7 @@ pub fn wasm_export_file_core(
                     .as_deref()
                     .or(session.raw_cfa.as_deref())
                     .ok_or_else(|| "CFA raw buffer unavailable for DNG export".to_string())?;
-                write_cfa_dng_bytes(cfa, fw, fh, &session.meta)
+                write_cfa_dng_bytes(cfa, session.cfa_width, session.cfa_height, &session.meta)
                     .map_err(|e| format!("DNG export failed: {e}"))
             }
             "xmp" => {

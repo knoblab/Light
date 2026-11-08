@@ -258,12 +258,52 @@ pub async fn cmd_inpaint(
         };
         let cfa_data = read_npy_u16(&cfa_path)
             .map_err(|e| format!("Failed to read cfa_raw: {e}"))?;
+        let (cfa_w, cfa_h) = if cfa_data.0.len() >= 2 {
+            (cfa_data.0[1], cfa_data.0[0])
+        } else {
+            (fw, fh)
+        };
+        let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = meta.raw_crop {
+            (cx, cy)
+        } else if cfa_w > fw && cfa_h > fh {
+            (((cfa_w - fw) / 2) & !1, ((cfa_h - fh) / 2) & !1)
+        } else {
+            (0, 0)
+        };
+        let cfa_spots: Vec<DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
+            spots_vec
+                .iter()
+                .map(|s| {
+                    let mut s2 = s.clone();
+                    s2.cx += crop_x as f64;
+                    s2.cy += crop_y as f64;
+                    s2
+                })
+                .collect()
+        } else {
+            spots_vec.clone()
+        };
+        let cfa_strokes: Vec<ManualBrushStroke> = if crop_x > 0 || crop_y > 0 {
+            strokes_vec
+                .iter()
+                .map(|st| {
+                    let mut st2 = st.clone();
+                    for pt in &mut st2.points {
+                        pt.x += crop_x as f64;
+                        pt.y += crop_y as f64;
+                    }
+                    st2
+                })
+                .collect()
+        } else {
+            strokes_vec.clone()
+        };
         let (healed, _) = heal_cfa_image_cancellable(
             &cfa_data.1,
-            fw,
-            fh,
-            &spots_vec,
-            &strokes_vec,
+            cfa_w,
+            cfa_h,
+            &cfa_spots,
+            &cfa_strokes,
             pattern,
             inpaint_r,
             preserve_g,
@@ -272,7 +312,7 @@ pub async fn cmd_inpaint(
             None,
         )
         .map_err(|e| format!("CFA heal failed: {e}"))?;
-        write_npy_u16(&session_dir.join("healed_cfa.npy"), &[fh, fw], &healed)
+        write_npy_u16(&session_dir.join("healed_cfa.npy"), &[cfa_h, cfa_w], &healed)
             .map_err(|e| format!("Write healed_cfa failed: {e}"))?;
     }
 
@@ -333,7 +373,12 @@ pub async fn cmd_export_file(
             };
             let cfa_data = read_npy_u16(&cfa_path)
                 .map_err(|e| format!("Failed to read CFA buffer: {e}"))?;
-            write_cfa_dng(&target_path, &cfa_data.1, fw, fh, &meta)
+            let (cfa_w, cfa_h) = if cfa_data.0.len() >= 2 {
+                (cfa_data.0[1], cfa_data.0[0])
+            } else {
+                (fw, fh)
+            };
+            write_cfa_dng(&target_path, &cfa_data.1, cfa_w, cfa_h, &meta)
                 .map_err(|e| format!("DNG write failed: {e}"))?;
         }
         "xmp" => {

@@ -1059,7 +1059,11 @@ export function App() {
                 >
                   <span>DNG</span>
                   <span className="text-[10px] text-[#888783]">
-                    {dngAllowed ? '16-bit · 선형 RGB' : '사용 불가'}
+                    {dngAllowed
+                      ? meta?.decodeKind === 'raw-linear16'
+                        ? '16-bit · 원본 CFA RAW'
+                        : '16-bit · 선형 RGB'
+                      : '사용 불가'}
                   </span>
                 </button>
                 <button

@@ -91,18 +91,18 @@ pub fn write_cfa_dng_bytes(
     ifd.set(t::WHITE_LEVEL, Value::Long(vec![wl]));
 
     // White Balance & Color Matrices
-    if meta.camera_wb.len() >= 3 {
-        let wb_num: Vec<u32> = meta
-            .camera_wb
-            .iter()
-            .take(3)
-            .map(|&v| (v * 10000.0).round() as u32)
-            .collect();
-        let mut wb_rats = Vec::new();
-        for &num in &wb_num {
-            wb_rats.push((num, 10000));
+    if meta.camera_wb.len() >= 3 && meta.camera_wb.iter().take(3).all(|&v| v > 0.0 && v.is_finite()) {
+        let inv: Vec<f64> = meta.camera_wb.iter().take(3).map(|&v| 1.0 / v).collect();
+        let max = inv.iter().cloned().fold(0.0f64, f64::max);
+        if max > 0.0 {
+            let mut wb_rats = Vec::new();
+            for &val in &inv {
+                let norm = val / max;
+                let num = (norm * 1_000_000.0).round() as u32;
+                wb_rats.push((num, 1_000_000));
+            }
+            ifd.set(t::AS_SHOT_NEUTRAL, Value::Rational(wb_rats));
         }
-        ifd.set(t::AS_SHOT_NEUTRAL, Value::Rational(wb_rats));
     }
 
     if meta.color_matrix.len() >= 3 && meta.color_matrix[0].len() >= 3 {
@@ -115,13 +115,50 @@ pub fn write_cfa_dng_bytes(
         }
         ifd.set(t::COLOR_MATRIX_1, Value::SRational(cm_rats));
         ifd.set(t::CALIBRATION_ILLUMINANT_1, Value::Short(vec![17])); // 17 = Standard Light A
+    } else {
+        // Fallback standard DNG ColorMatrix1 (XYZ D65 to standard camera sRGB) when camera embeds no matrix
+        // [3.2406, -1.5372, -0.4986], [-0.9689, 1.8758, 0.0415], [0.0557, -0.2040, 1.0570]
+        let srgb_from_xyz = [
+            (32406, 10000),
+            (-15372, 10000),
+            (-4986, 10000),
+            (-9689, 10000),
+            (18758, 10000),
+            (415, 10000),
+            (557, 10000),
+            (-2040, 10000),
+            (10570, 10000),
+        ];
+        ifd.set(t::COLOR_MATRIX_1, Value::SRational(srgb_from_xyz.to_vec()));
+        ifd.set(t::CALIBRATION_ILLUMINANT_1, Value::Short(vec![21])); // 21 = D65
     }
 
-    // Default Crop Area
-    ifd.set(t::DEFAULT_CROP_ORIGIN, Value::Short(vec![0, 0]));
+    // Default Crop Area & Active Area
+    let (crop_x, crop_y, crop_w, crop_h) = if let Some([cx, cy, cw, ch]) = meta.raw_crop {
+        (cx, cy, cw, ch)
+    } else if width > meta.full_width && height > meta.full_height {
+        let diff_x = width - meta.full_width;
+        let diff_y = height - meta.full_height;
+        let mut cx = diff_x / 2;
+        let mut cy = diff_y / 2;
+        cx -= cx % 2;
+        cy -= cy % 2;
+        (cx, cy, meta.full_width, meta.full_height)
+    } else {
+        (0, 0, width, height)
+    };
+
+    ifd.set(
+        t::ACTIVE_AREA,
+        Value::Long(vec![0, 0, height as u32, width as u32]),
+    );
+    ifd.set(
+        t::DEFAULT_CROP_ORIGIN,
+        Value::Short(vec![crop_x as u16, crop_y as u16]),
+    );
     ifd.set(
         t::DEFAULT_CROP_SIZE,
-        Value::Short(vec![width as u16, height as u16]),
+        Value::Short(vec![crop_w as u16, crop_h as u16]),
     );
 
     // Embed XMP metadata if provided
@@ -206,6 +243,7 @@ mod tests {
                 estimated_dynamic_range_ev: 12.0,
             },
             exif: ExifMetadata::default(),
+            raw_crop: None,
         };
 
         write_cfa_dng(&dng_path, &cfa, w, h, &meta).expect("write_cfa_dng should succeed");
@@ -215,5 +253,22 @@ mod tests {
         assert!(data.len() > w * h * 2);
         // TIFF magic header: "II\x2a\x00" (little endian)
         assert_eq!(&data[0..4], b"II\x2a\x00");
+
+        let tiff = sc_tiff::Tiff::parse(&data).expect("TIFF parsing should succeed");
+        let ifd0 = tiff.ifds.first().expect("IFD0 should exist");
+
+        // Verify AsShotNeutral is reciprocal: camera_wb=[2.0, 1.0, 1.5] -> inv=[0.5, 1.0, 0.6667] -> norm=[0.5, 1.0, 0.6667]
+        let as_shot = ifd0
+            .get(t::AS_SHOT_NEUTRAL)
+            .expect("AS_SHOT_NEUTRAL should exist")
+            .value
+            .to_f64_vec();
+        assert_eq!(as_shot.len(), 3);
+        assert!((as_shot[0] - 0.5).abs() < 1e-4);
+        assert!((as_shot[1] - 1.0).abs() < 1e-4);
+        assert!((as_shot[2] - 2.0 / 3.0).abs() < 1e-4);
+
+        // Verify ColorMatrix1 exists
+        assert!(ifd0.get(t::COLOR_MATRIX_1).is_some());
     }
 }

@@ -180,6 +180,7 @@ fn r2_multi_frame_temporal_clustering() {
         bayer_pattern: "RGGB".into(),
         stats_16_bit: Stats16Bit::default(),
         exif: ExifMetadata::default(),
+        raw_crop: None,
     };
 
     let make_spot = |idx: usize, cx: f64, cy: f64, r: f64| DetectedDustSpot {

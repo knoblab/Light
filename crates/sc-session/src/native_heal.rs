@@ -528,14 +528,56 @@ pub fn inpaint_16bit_linear_native(
 
     let cfa_raw_path = session_dir.join("cfa_raw.npy");
     let has_cfa = if cfa_raw_path.exists() {
-        if let Ok((_, cfa_data)) = read_npy_u16(&cfa_raw_path) {
+        if let Ok((shape, cfa_data)) = read_npy_u16(&cfa_raw_path) {
+            let (cfa_h, cfa_w) = if shape.len() >= 2 {
+                (shape[0], shape[1])
+            } else {
+                (full_h, full_w)
+            };
+            let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = meta.raw_crop {
+                (cx, cy)
+            } else if cfa_w > full_w && cfa_h > full_h {
+                (((cfa_w - full_w) / 2) & !1, ((cfa_h - full_h) / 2) & !1)
+            } else {
+                (0, 0)
+            };
+            let cfa_spots: Vec<sc_core::DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
+                params
+                    .spots
+                    .iter()
+                    .map(|s| {
+                        let mut s2 = s.clone();
+                        s2.cx += crop_x as f64;
+                        s2.cy += crop_y as f64;
+                        s2
+                    })
+                    .collect()
+            } else {
+                params.spots.clone()
+            };
+            let cfa_strokes: Vec<sc_core::ManualBrushStroke> = if crop_x > 0 || crop_y > 0 {
+                params
+                    .manual_strokes
+                    .iter()
+                    .map(|st| {
+                        let mut st2 = st.clone();
+                        for pt in &mut st2.points {
+                            pt.x += crop_x as f64;
+                            pt.y += crop_y as f64;
+                        }
+                        st2
+                    })
+                    .collect()
+            } else {
+                params.manual_strokes.clone()
+            };
             let pattern = sc_heal::BayerPattern::from_bayer_str(&meta.bayer_pattern);
             let (healed_cfa, _cfa_rois) = sc_heal::heal_cfa_image(
                 &cfa_data,
-                full_w,
-                full_h,
-                &params.spots,
-                &params.manual_strokes,
+                cfa_w,
+                cfa_h,
+                &cfa_spots,
+                &cfa_strokes,
                 pattern,
                 params.inpaint_radius,
                 params.preserve_grain,
@@ -544,7 +586,7 @@ pub fn inpaint_16bit_linear_native(
             );
             let _ = write_npy_u16(
                 &session_dir.join("inpainted_cfa.npy"),
-                &[full_h, full_w],
+                &[cfa_h, cfa_w],
                 &healed_cfa,
             );
             true
@@ -755,8 +797,13 @@ pub fn export_healed_image_native(
                 None
             };
 
-            if let Some((_, cfa)) = cfa_buf {
-                sc_dng::write_cfa_dng(output_path, &cfa, w, h, &meta)?;
+            if let Some((shape, cfa)) = cfa_buf {
+                let (cfa_w, cfa_h) = if shape.len() >= 2 {
+                    (shape[1], shape[0])
+                } else {
+                    (w, h)
+                };
+                sc_dng::write_cfa_dng(output_path, &cfa, cfa_w, cfa_h, &meta)?;
 
                 // Generate and write Lightroom/ACR-compatible XMP sidecar alongside DNG
                 let inpaint_params_path = session_dir.join("inpaint_params.json");
@@ -764,14 +811,51 @@ pub fn export_healed_image_native(
                     && let Ok(content) = std::fs::read_to_string(&inpaint_params_path)
                     && let Ok(params) = serde_json::from_str::<InpaintParams>(&content)
                 {
+                    let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = meta.raw_crop {
+                        (cx, cy)
+                    } else if cfa_w > w && cfa_h > h {
+                        (((cfa_w - w) / 2) & !1, ((cfa_h - h) / 2) & !1)
+                    } else {
+                        (0, 0)
+                    };
+                    let cfa_spots: Vec<sc_core::DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
+                        params
+                            .spots
+                            .iter()
+                            .map(|s| {
+                                let mut s2 = s.clone();
+                                s2.cx += crop_x as f64;
+                                s2.cy += crop_y as f64;
+                                s2
+                            })
+                            .collect()
+                    } else {
+                        params.spots.clone()
+                    };
+                    let cfa_strokes: Vec<sc_core::ManualBrushStroke> = if crop_x > 0 || crop_y > 0 {
+                        params
+                            .manual_strokes
+                            .iter()
+                            .map(|st| {
+                                let mut st2 = st.clone();
+                                for pt in &mut st2.points {
+                                    pt.x += crop_x as f64;
+                                    pt.y += crop_y as f64;
+                                }
+                                st2
+                            })
+                            .collect()
+                    } else {
+                        params.manual_strokes.clone()
+                    };
                     let xmp_path = output_path.with_extension("xmp");
                     let _ = sc_dng::write_xmp_sidecar(
                         &xmp_path,
                         &cfa,
-                        w,
-                        h,
-                        &params.spots,
-                        &params.manual_strokes,
+                        cfa_w,
+                        cfa_h,
+                        &cfa_spots,
+                        &cfa_strokes,
                     );
                 }
             } else {

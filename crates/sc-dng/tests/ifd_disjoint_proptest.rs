@@ -270,6 +270,7 @@ fn make_test_meta(w: usize, h: usize, xmp_bytes: Vec<u8>) -> SessionMetadata {
             software: "SensorClean Pro".into(),
             raw_xmp_bytes: xmp_bytes,
         },
+        raw_crop: None,
     }
 }
 

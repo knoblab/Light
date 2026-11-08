@@ -36,6 +36,7 @@ fn test_wasm_session_lifecycle() {
         bayer_pattern: "RGGB".into(),
         stats_16_bit: Default::default(),
         exif: Default::default(),
+        raw_crop: None,
     };
 
     let dng_bytes = sc_dng::write_cfa_dng_bytes(&cfa, w, h, &meta).unwrap();

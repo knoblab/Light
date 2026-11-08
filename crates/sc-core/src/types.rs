@@ -20,7 +20,7 @@ impl DecodeKind {
     pub fn bit_depth_label(self) -> &'static str {
         match self {
             Self::RawLinear16 => "16-bit 원본 CFA RAW 센서 데이터",
-            Self::RawDeveloped => "16-bit 선형 RGB (LibRaw 현상)",
+            Self::RawDeveloped => "16-bit 선형 RGB (디모자이크 현상)",
             Self::EmbeddedPreview => "8-bit 내장 미리보기 (센서 데이터 아님)",
             Self::Image16bit => "16-bit RGB",
             Self::Image8bit => "8-bit 이미지 (16-bit 선형으로 변환)",
@@ -30,7 +30,7 @@ impl DecodeKind {
     pub fn color_space_label(self) -> &'static str {
         match self {
             Self::RawLinear16 => "센서 네이티브 CFA (비디모자이크)",
-            Self::RawDeveloped => "선형 RGB, sRGB 원색 (LibRaw 현상, gamma 1.0)",
+            Self::RawDeveloped => "선형 RGB, sRGB 원색 (gamma 1.0)",
             Self::EmbeddedPreview => "sRGB 추정",
             Self::Image16bit => "16-bit 원본 RGB",
             Self::Image8bit => "sRGB 추정 (선형화)",
@@ -164,6 +164,8 @@ pub struct SessionMetadata {
     pub bayer_pattern: String,
     pub stats_16_bit: Stats16Bit,
     pub exif: ExifMetadata,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_crop: Option<[usize; 4]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -21,7 +21,7 @@ export const PipelineArchitectureView: React.FC<PipelineArchitectureViewProps> =
             16-bit 선형 RAW 처리 흐름
           </h2>
           <p className="text-sm text-neutral-400 mt-1.5 leading-relaxed">
-            RAW를 LibRaw로 16-bit 선형 RGB(감마 1.0)로 현상한 뒤 먼지 영역 픽셀만 치환하고, 선형 RGB DNG·TIFF 등으로 출력합니다. 원본 CFA 데이터를 보존하는 DNG 출력은 개발 예정입니다.
+            순수 Rust 엔진으로 원본 16-bit CFA Bayer RAW 센서 데이터를 디코딩하여 먼지 영역 픽셀만 정밀 치환하고, 원본 CFA 모자이크를 그대로 보존하는 16-bit DNG 및 TIFF/PNG 등으로 출력합니다.
           </p>
         </div>
 

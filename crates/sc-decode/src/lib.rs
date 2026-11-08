@@ -17,7 +17,7 @@
 )]
 
 use image::{DynamicImage, GenericImageView};
-use sc_color::{D65, REC2020, SRGB, bradford};
+use sc_color::{D65, Mat3, REC2020, SRGB, bradford};
 use sc_raw::{
     DngCompression, DngWriteOptions, Method, RawData, RawImage,
     color::{as_shot_white_xy, camera_to_rec2020, wb_multipliers},
@@ -203,13 +203,15 @@ fn develop_raw_to_linear16_srgb(
         .map_err(|e| ScError::CorruptInput(format!("RAW 디모자이킹 실패: {e}")))?;
 
     let white_xy = as_shot_white_xy(raw);
-    let (cam_to_rec2020, _) = camera_to_rec2020(raw, white_xy);
+    let (cam_to_rec2020, wb) = camera_to_rec2020(raw, white_xy);
     let rec2020_to_xyz = REC2020.to_xyz();
     let srgb_from_xyz = SRGB.from_xyz();
     let rec2020_to_srgb = srgb_from_xyz
         .mul(&bradford(REC2020.white, D65))
         .mul(&rec2020_to_xyz);
-    let cam_to_srgb = rec2020_to_srgb.mul(&cam_to_rec2020);
+    let cam_to_rec2020_wb =
+        cam_to_rec2020.mul(&Mat3::diag(wb[0] as f64, wb[1] as f64, wb[2] as f64));
+    let cam_to_srgb = rec2020_to_srgb.mul(&cam_to_rec2020_wb);
     let m = cam_to_srgb.0;
 
     let uw = cam_rgb.width;
@@ -242,18 +244,23 @@ fn develop_raw_to_linear16_srgb(
         let lut_lin = build_srgb8_to_linear16_lut();
         let mut thumb_lin: Vec<f32> = rgb8
             .as_raw()
-            .iter()
-            .step_by(3)
-            .map(|&v| lut_lin[v as usize] as f32 / 65535.0)
+            .chunks_exact(3)
+            .map(|px| {
+                let r = lut_lin[px[0] as usize] as f32 / 65535.0;
+                let g = lut_lin[px[1] as usize] as f32 / 65535.0;
+                let b = lut_lin[px[2] as usize] as f32 / 65535.0;
+                0.2126 * r + 0.7152 * g + 0.0722 * b
+            })
             .collect();
-        let mut lin_sub = Vec::with_capacity((full_h.div_ceil(4)) * (full_w.div_ceil(4)) * 3);
+        let mut lin_sub = Vec::with_capacity((full_h.div_ceil(4)) * (full_w.div_ceil(4)));
         for y in (0..full_h).step_by(4) {
             let row = &linear_16bit[y * full_w * 3..(y + 1) * full_w * 3];
             for x in (0..full_w).step_by(4) {
                 let b = x * 3;
-                lin_sub.push(row[b] as f32 / 65535.0);
-                lin_sub.push(row[b + 1] as f32 / 65535.0);
-                lin_sub.push(row[b + 2] as f32 / 65535.0);
+                let r = row[b] as f32 / 65535.0;
+                let g = row[b + 1] as f32 / 65535.0;
+                let b_val = row[b + 2] as f32 / 65535.0;
+                lin_sub.push(0.2126 * r + 0.7152 * g + 0.0722 * b_val);
             }
         }
         let lin_p85 = percentile_f32(&mut lin_sub, 85.0);
@@ -408,9 +415,9 @@ pub fn ingest_bytes(
 
                 let (lin16, fw, fh, exp_ovr) = develop_raw_to_linear16_srgb(&raw, bytes)?;
                 let kind = if raw.cfa.is_some() {
-                    DecodeKind::RawDeveloped
-                } else {
                     DecodeKind::RawLinear16
+                } else {
+                    DecodeKind::RawDeveloped
                 };
                 raw_image_opt = Some(raw);
                 (lin16, fw, fh, kind, exp_ovr, geom)
@@ -568,6 +575,13 @@ pub fn ingest_bytes(
             estimated_dynamic_range_ev: dynamic_range_ev,
         },
         exif: exif_meta,
+        raw_crop: if is_raw {
+            let cx = geometry.active_area.x + geometry.default_crop.x;
+            let cy = geometry.active_area.y + geometry.default_crop.y;
+            Some([cx, cy, geometry.default_crop.width, geometry.default_crop.height])
+        } else {
+            None
+        },
     };
 
     let _ = CfaPattern::rggb();
