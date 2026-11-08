@@ -47,6 +47,12 @@ pub fn gaussian_blur_f32(src: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32
     if w == 0 || h == 0 || src.len() < w.saturating_mul(h) {
         return Vec::new();
     }
+    // Pyramidal acceleration for large sigma on large images (e.g. background estimation)
+    if sigma >= 8.0 && w >= 256 && h >= 256 {
+        let (down, dw, dh) = downsample_2x_f32(src, w, h);
+        let blurred_down = gaussian_blur_f32(&down, dw, dh, sigma * 0.5);
+        return upsample_bilinear_f32(&blurred_down, dw, dh, w, h);
+    }
     let kernel = build_gaussian_kernel(sigma);
     if kernel.len() <= 1 {
         return src[..w * h].to_vec();
@@ -89,6 +95,64 @@ pub fn gaussian_blur_f32(src: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32
         }
     });
 
+    dst
+}
+
+/// Downsamples a 2D float image by 2x using 2x2 box averaging.
+pub fn downsample_2x_f32(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    let dw = (w / 2).max(1);
+    let dh = (h / 2).max(1);
+    let mut dst = vec![0.0f32; dw * dh];
+    for dy in 0..dh {
+        let sy = dy * 2;
+        let sy_next = (sy + 1).min(h - 1);
+        let r0 = &src[sy * w..(sy + 1) * w];
+        let r1 = &src[sy_next * w..(sy_next + 1) * w];
+        let out_row = &mut dst[dy * dw..(dy + 1) * dw];
+        for dx in 0..dw {
+            let sx = dx * 2;
+            let sx_next = (sx + 1).min(w - 1);
+            out_row[dx] = 0.25 * (r0[sx] + r0[sx_next] + r1[sx] + r1[sx_next]);
+        }
+    }
+    (dst, dw, dh)
+}
+
+/// Upsamples a 2D float image to `(target_w, target_h)` using bilinear interpolation.
+pub fn upsample_bilinear_f32(src: &[f32], sw: usize, sh: usize, target_w: usize, target_h: usize) -> Vec<f32> {
+    if target_w == 0 || target_h == 0 {
+        return Vec::new();
+    }
+    if sw == target_w && sh == target_h {
+        return src[..target_w * target_h].to_vec();
+    }
+    let mut dst = vec![0.0f32; target_w * target_h];
+    let x_scale = sw as f32 / target_w as f32;
+    let y_scale = sh as f32 / target_h as f32;
+
+    for dy in 0..target_h {
+        let fy = (dy as f32 + 0.5) * y_scale - 0.5;
+        let sy0 = (fy.floor() as isize).clamp(0, sh as isize - 1) as usize;
+        let sy1 = (sy0 + 1).min(sh - 1);
+        let wy = (fy - sy0 as f32).clamp(0.0, 1.0);
+
+        let out_row = &mut dst[dy * target_w..(dy + 1) * target_w];
+        for dx in 0..target_w {
+            let fx = (dx as f32 + 0.5) * x_scale - 0.5;
+            let sx0 = (fx.floor() as isize).clamp(0, sw as isize - 1) as usize;
+            let sx1 = (sx0 + 1).min(sw - 1);
+            let wx = (fx - sx0 as f32).clamp(0.0, 1.0);
+
+            let v00 = src[sy0 * sw + sx0];
+            let v10 = src[sy0 * sw + sx1];
+            let v01 = src[sy1 * sw + sx0];
+            let v11 = src[sy1 * sw + sx1];
+
+            let top = v00 * (1.0 - wx) + v10 * wx;
+            let bot = v01 * (1.0 - wx) + v11 * wx;
+            out_row[dx] = top * (1.0 - wy) + bot * wy;
+        }
+    }
     dst
 }
 

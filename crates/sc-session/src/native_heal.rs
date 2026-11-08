@@ -15,7 +15,6 @@ use sc_core::{
 use sc_detect::annulus::fast_fit_plane;
 use sc_imgproc::{
     dilate_u8, draw_filled_circle_u8, draw_thick_line_u8, ellipse_kernel, gaussian_blur_f32,
-    resize_inter_area_u16_rgb, resize_nearest_u8,
 };
 use std::fs::File;
 use std::io::BufWriter;
@@ -127,6 +126,246 @@ pub fn build_combined_mask(
     mask
 }
 
+/// Fast box-averaging downsampler for a local RGB 16-bit patch from `(sw, sh)` to `(dw, dh)`.
+/// Requires zero heap allocations in inner loops and zero floating-point conversions.
+pub fn downsample_patch_rgb16(src: &[u16], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u16> {
+    if dw == 0 || dh == 0 {
+        return Vec::new();
+    }
+    if sw == dw && sh == dh {
+        return src[..dw * dh * 3].to_vec();
+    }
+    let mut dst = vec![0u16; dw * dh * 3];
+    for dy in 0..dh {
+        let sy0 = dy * sh / dh;
+        let sy1 = (((dy + 1) * sh + dh - 1) / dh).min(sh).max(sy0 + 1);
+        for dx in 0..dw {
+            let sx0 = dx * sw / dw;
+            let sx1 = (((dx + 1) * sw + dw - 1) / dw).min(sw).max(sx0 + 1);
+            let count = ((sx1 - sx0) * (sy1 - sy0)) as u64;
+
+            let mut sum_r = 0u64;
+            let mut sum_g = 0u64;
+            let mut sum_b = 0u64;
+
+            for sy in sy0..sy1 {
+                let row_offset = sy * sw * 3;
+                for sx in sx0..sx1 {
+                    let base = row_offset + sx * 3;
+                    sum_r += src[base] as u64;
+                    sum_g += src[base + 1] as u64;
+                    sum_b += src[base + 2] as u64;
+                }
+            }
+
+            let d_base = (dy * dw + dx) * 3;
+            dst[d_base] = ((sum_r + count / 2) / count) as u16;
+            dst[d_base + 1] = ((sum_g + count / 2) / count) as u16;
+            dst[d_base + 2] = ((sum_b + count / 2) / count) as u16;
+        }
+    }
+    dst
+}
+
+/// Computes disjoint bounding boxes `[(min_x, min_y, max_x, max_y)]` in full-image coordinates
+/// covering all enabled spots and brush strokes with required skirt and feather margins.
+pub fn compute_analytic_bboxes(
+    full_w: usize,
+    full_h: usize,
+    work_scale: f64,
+    spots: &[DetectedDustSpot],
+    strokes: &[ManualBrushStroke],
+    inpaint_r: f64,
+) -> Vec<(usize, usize, usize, usize)> {
+    let skirt_pad_px = ((inpaint_r * 0.45).round() as usize).max(2);
+    let feather_px = ((inpaint_r * 0.70).round() as usize).max(3);
+    let extra_dilation = (skirt_pad_px + feather_px) as f64;
+    let scale = if work_scale > 0.0 { work_scale } else { 1.0 };
+
+    let mut boxes = Vec::new();
+
+    for spot in spots {
+        if !spot.enabled {
+            continue;
+        }
+        let skirt_mult = if spot.spot_type.as_deref() == Some("bokeh") {
+            1.72
+        } else {
+            1.55
+        };
+        let min_skirt_r = spot.radius * skirt_mult + 2.0;
+        let r_val = spot.radius.max(min_skirt_r);
+        let r_full = (r_val.round() as usize).max(3) as f64;
+        let r_expanded = r_full + extra_dilation;
+
+        let cx = if spot.cx > 0.0 { spot.cx } else { spot.work_cx / scale };
+        let cy = if spot.cy > 0.0 { spot.cy } else { spot.work_cy / scale };
+
+        let x0 = ((cx - r_expanded).floor() as isize).clamp(0, full_w as isize) as usize;
+        let y0 = ((cy - r_expanded).floor() as isize).clamp(0, full_h as isize) as usize;
+        let x1 = ((cx + r_expanded).ceil() as isize).clamp(0, full_w as isize) as usize;
+        let y1 = ((cy + r_expanded).ceil() as isize).clamp(0, full_h as isize) as usize;
+
+        if x1 > x0 && y1 > y0 {
+            boxes.push((x0, y0, x1, y1));
+        }
+    }
+
+    for stroke in strokes {
+        if stroke.mode == "erase" || stroke.points.is_empty() {
+            continue;
+        }
+        let r_expanded = stroke.radius + extra_dilation;
+        let mut min_x = f64::MAX;
+        let mut min_y = f64::MAX;
+        let mut max_x = f64::MIN;
+        let mut max_y = f64::MIN;
+
+        for pt in &stroke.points {
+            min_x = min_x.min(pt.x);
+            min_y = min_y.min(pt.y);
+            max_x = max_x.max(pt.x);
+            max_y = max_y.max(pt.y);
+        }
+
+        let x0 = ((min_x - r_expanded).floor() as isize).clamp(0, full_w as isize) as usize;
+        let y0 = ((min_y - r_expanded).floor() as isize).clamp(0, full_h as isize) as usize;
+        let x1 = ((max_x + r_expanded).ceil() as isize).clamp(0, full_w as isize) as usize;
+        let y1 = ((max_y + r_expanded).ceil() as isize).clamp(0, full_h as isize) as usize;
+
+        if x1 > x0 && y1 > y0 {
+            boxes.push((x0, y0, x1, y1));
+        }
+    }
+
+    merge_overlapping_bboxes(boxes)
+}
+
+fn merge_overlapping_bboxes(mut boxes: Vec<(usize, usize, usize, usize)>) -> Vec<(usize, usize, usize, usize)> {
+    if boxes.len() <= 1 {
+        return boxes;
+    }
+    let mut merged = true;
+    while merged {
+        merged = false;
+        let mut i = 0;
+        while i < boxes.len() {
+            let mut j = i + 1;
+            while j < boxes.len() {
+                let (ax0, ay0, ax1, ay1) = boxes[i];
+                let (bx0, by0, bx1, by1) = boxes[j];
+                // Check if boxes intersect or touch
+                if ax0 <= bx1 && ax1 >= bx0 && ay0 <= by1 && ay1 >= by0 {
+                    boxes[i] = (ax0.min(bx0), ay0.min(by0), ax1.max(bx1), ay1.max(by1));
+                    boxes.swap_remove(j);
+                    merged = true;
+                } else {
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+    boxes
+}
+
+/// Draws the base binary mask inside a local patch `[bx1, by1, bx2, by2]`.
+fn draw_patch_mask(
+    rw: usize,
+    rh: usize,
+    bx1: usize,
+    by1: usize,
+    spots: &[DetectedDustSpot],
+    strokes: &[ManualBrushStroke],
+    work_scale: f64,
+) -> Vec<u8> {
+    let mut mask = vec![0u8; rw * rh];
+    let bx2 = bx1 + rw;
+    let by2 = by1 + rh;
+    let ibx1 = bx1 as isize;
+    let ibx2 = bx2 as isize;
+    let iby1 = by1 as isize;
+    let iby2 = by2 as isize;
+    let fbx1 = bx1 as f64;
+    let fbx2 = bx2 as f64;
+    let fby1 = by1 as f64;
+    let fby2 = by2 as f64;
+    let scale = if work_scale > 0.0 { work_scale } else { 1.0 };
+
+    for spot in spots {
+        if !spot.enabled {
+            continue;
+        }
+        let cx = (if spot.cx > 0.0 { spot.cx } else { spot.work_cx / scale }).round() as isize;
+        let cy = (if spot.cy > 0.0 { spot.cy } else { spot.work_cy / scale }).round() as isize;
+        let skirt_mult = if spot.spot_type.as_deref() == Some("bokeh") {
+            1.72
+        } else {
+            1.55
+        };
+        let min_skirt_r = spot.radius * skirt_mult + 2.0;
+        let r_val = spot.radius.max(min_skirt_r);
+        let r = (r_val.round() as isize).max(3);
+
+        if cx + r < ibx1 || cx - r >= ibx2 || cy + r < iby1 || cy - r >= iby2 {
+            continue;
+        }
+
+        let lx = cx - ibx1;
+        let ly = cy - iby1;
+        draw_filled_circle_u8(&mut mask, rw, rh, lx, ly, r, 255);
+    }
+
+    for stroke in strokes {
+        let val = if stroke.mode == "erase" { 0u8 } else { 255u8 };
+        let r = stroke.radius.round().max(2.0);
+        let ir = r as isize;
+        let pts = &stroke.points;
+        if pts.is_empty() {
+            continue;
+        }
+        if pts.len() == 1 {
+            let px = pts[0].x.round() as isize;
+            let py = pts[0].y.round() as isize;
+            if px + ir >= ibx1 && px - ir < ibx2 && py + ir >= iby1 && py - ir < iby2 {
+                let lx = px - ibx1;
+                let ly = py - iby1;
+                draw_filled_circle_u8(&mut mask, rw, rh, lx, ly, ir, val);
+            }
+        } else {
+            for i in 0..(pts.len() - 1) {
+                let x1 = pts[i].x;
+                let y1 = pts[i].y;
+                let x2 = pts[i + 1].x;
+                let y2 = pts[i + 1].y;
+
+                let min_x = x1.min(x2) - r;
+                let max_x = x1.max(x2) + r;
+                let min_y = y1.min(y2) - r;
+                let max_y = y1.max(y2) + r;
+
+                if max_x < fbx1 || min_x >= fbx2 || max_y < fby1 || min_y >= fby2 {
+                    continue;
+                }
+
+                draw_thick_line_u8(
+                    &mut mask,
+                    rw,
+                    rh,
+                    x1 - fbx1,
+                    y1 - fby1,
+                    x2 - fbx1,
+                    y2 - fby1,
+                    r,
+                    val,
+                );
+            }
+        }
+    }
+
+    mask
+}
+
 /// Deterministic Xorshift64* PRNG for repeatable sensor grain synthesis (`seed = 42`).
 struct DeterministicRng {
     state: u64,
@@ -206,7 +445,7 @@ fn telea_harmonic_fill_roi(
 
     let mut telea = detrended.to_vec();
     if !boundary_pts.is_empty() {
-        let stride = (boundary_pts.len() / 256).max(1);
+        let stride = (boundary_pts.len() / 64).max(1);
         for y in 0..rh {
             for x in 0..rw {
                 let idx = y * rw + x;
@@ -277,29 +516,25 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
         &params.manual_strokes,
     );
 
-    let full_mask = if (full_w, full_h) != (work_w, work_h) {
-        resize_nearest_u8(&work_mask, work_w, work_h, full_w, full_h)
-    } else {
-        work_mask.clone()
-    };
-
-    let kw_skirt = skirt_pad_px * 2 + 1;
-    let k_skirt = ellipse_kernel(kw_skirt, kw_skirt);
-    let full_mask_core = dilate_u8(&full_mask, full_w, full_h, kw_skirt, kw_skirt, &k_skirt);
-    let inpainted_pixels = full_mask_core.iter().filter(|&&v| v != 0).count();
+    let bboxes = compute_analytic_bboxes(
+        full_w,
+        full_h,
+        work_scale,
+        &params.spots,
+        &params.manual_strokes,
+        inpaint_r,
+    );
 
     let mut healed_16bit = linear_16bit.to_vec();
     let mut healed_work_u8 = work_orig_u8.to_vec();
+    let mut inpainted_pixels = 0usize;
     let mut roi_count = 0usize;
 
-    if inpainted_pixels > 0 {
+    if !bboxes.is_empty() {
+        let kw_skirt = skirt_pad_px * 2 + 1;
+        let k_skirt = ellipse_kernel(kw_skirt, kw_skirt);
         let kw_feather = feather_px * 2 + 1;
         let k_feather = ellipse_kernel(kw_feather, kw_feather);
-        let full_mask_expanded =
-            dilate_u8(&full_mask_core, full_w, full_h, kw_feather, kw_feather, &k_feather);
-
-        // Extract connected component bounding boxes of `full_mask_expanded`
-        let bboxes = extract_mask_bboxes(&full_mask_expanded, full_w, full_h);
         let kw_ring = ring_width_px * 2 + 1;
         let k_ring = ellipse_kernel(kw_ring, kw_ring);
         let mut rng = DeterministicRng::new(42);
@@ -319,25 +554,21 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
             if rw == 0 || rh == 0 {
                 continue;
             }
-            roi_count += 1;
 
-            let mut roi_expanded = vec![0u8; rw * rh];
-            let mut roi_core = vec![0u8; rw * rh];
-            let mut any_core = false;
-            for y in 0..rh {
-                for x in 0..rw {
-                    let g_idx = (by1 + y) * full_w + (bx1 + x);
-                    let exp_v = full_mask_expanded[g_idx];
-                    roi_expanded[y * rw + x] = exp_v;
-                    if exp_v > 0 && full_mask_core[g_idx] > 0 {
-                        roi_core[y * rw + x] = 255;
-                        any_core = true;
-                    }
-                }
-            }
-            if !any_core {
+            let roi_mask = draw_patch_mask(rw, rh, bx1, by1, &params.spots, &params.manual_strokes, work_scale);
+            if roi_mask.iter().all(|&v| v == 0) {
                 continue;
             }
+
+            let roi_core = dilate_u8(&roi_mask, rw, rh, kw_skirt, kw_skirt, &k_skirt);
+            let core_cnt = roi_core.iter().filter(|&&v| v != 0).count();
+            if core_cnt == 0 {
+                continue;
+            }
+            inpainted_pixels += core_cnt;
+            roi_count += 1;
+
+            let roi_expanded = dilate_u8(&roi_core, rw, rh, kw_feather, kw_feather, &k_feather);
 
             let exp_f32: Vec<f32> = roi_expanded.iter().map(|&v| v as f32 / 255.0).collect();
             let mut roi_alpha = gaussian_blur_f32(&exp_f32, rw, rh, feather_sigma);
@@ -356,8 +587,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
             for y in 0..rh {
                 for x in 0..rw {
                     let r_idx = y * rw + x;
-                    let g_idx = (by1 + y) * full_w + (bx1 + x);
-                    if roi_outer_dilated[r_idx] > 0 && full_mask_expanded[g_idx] == 0 {
+                    if roi_outer_dilated[r_idx] > 0 && roi_expanded[r_idx] == 0 {
                         ring_coords.push((x, y));
                     }
                 }
@@ -492,7 +722,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                 let ww_p = wx2 - wx1;
                 let wh_p = wy2 - wy1;
                 let patch_work = if (rw, rh) != (ww_p, wh_p) {
-                    resize_inter_area_u16_rgb(&patch_16, rw, rh, ww_p, wh_p)
+                    downsample_patch_rgb16(&patch_16, rw, rh, ww_p, wh_p)
                 } else {
                     patch_16
                 };
@@ -671,6 +901,7 @@ pub fn inpaint_16bit_linear_native(
     Ok(res)
 }
 
+#[allow(dead_code)]
 fn extract_mask_bboxes(mask: &[u8], w: usize, h: usize) -> Vec<(usize, usize, usize, usize)> {
     let mut visited = vec![false; w * h];
     let mut stack = Vec::new();
@@ -948,3 +1179,118 @@ pub fn export_healed_image_native(
         file_size_bytes,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_spot(id: &str, cx: f64, cy: f64, r: f64) -> DetectedDustSpot {
+        DetectedDustSpot {
+            id: id.into(),
+            index: 0,
+            cx,
+            cy,
+            work_cx: cx,
+            work_cy: cy,
+            radius: r,
+            work_radius: r,
+            area: std::f64::consts::PI * r * r,
+            perimeter: 2.0 * std::f64::consts::PI * r,
+            circularity: 1.0,
+            contrast_drop_pct: 15.0,
+            spot_type: Some("regular".into()),
+            confidence: Some(0.9),
+            enabled: true,
+            is_manual: false,
+            tier: None,
+            is_multi_confirmed: None,
+            is_projected: None,
+            cluster_id: None,
+            match_count: None,
+            total_frames: None,
+        }
+    }
+
+    fn make_meta(w: usize, h: usize) -> SessionMetadata {
+        SessionMetadata {
+            original_file_name: "test.dng".into(),
+            extension: "dng".into(),
+            is_raw: false,
+            decode_kind: None,
+            is_input_16_bit: true,
+            is_linear16: true,
+            full_width: w,
+            full_height: h,
+            work_width: w,
+            work_height: h,
+            work_scale: 1.0,
+            exposure_scale: 1.0,
+            bit_depth: "16-bit".into(),
+            color_space: "sRGB".into(),
+            camera_wb: vec![1.0, 1.0, 1.0],
+            color_matrix: vec![],
+            black_level: vec![0, 0, 0, 0],
+            white_level: 65535,
+            bayer_pattern: "".into(),
+            stats_16_bit: sc_core::Stats16Bit::default(),
+            exif: sc_core::ExifMetadata::default(),
+            raw_crop: None,
+        }
+    }
+
+    #[test]
+    fn test_downsample_patch_rgb16() {
+        let sw = 4;
+        let sh = 4;
+        let dw = 2;
+        let dh = 2;
+        let src = vec![1000u16; sw * sh * 3];
+        let dst = downsample_patch_rgb16(&src, sw, sh, dw, dh);
+        assert_eq!(dst.len(), dw * dh * 3);
+        for v in dst {
+            assert_eq!(v, 1000u16);
+        }
+    }
+
+    #[test]
+    fn test_compute_analytic_bboxes_disjoint_and_merge() {
+        let spot1 = make_spot("1", 50.0, 50.0, 5.0);
+        let spot2 = make_spot("2", 55.0, 50.0, 5.0);
+        // Spot 1 and Spot 2 are overlapping (distance = 5.0 <= 2 * r_expanded)
+        let bboxes = compute_analytic_bboxes(200, 200, 1.0, &[spot1, spot2], &[], 10.0);
+        // Overlapping spots should be merged into a single bounding box
+        assert_eq!(bboxes.len(), 1);
+        let (x0, y0, x1, y1) = bboxes[0];
+        assert!(x0 < 50 && x1 > 55);
+        assert!(y0 < 50 && y1 > 50);
+    }
+
+    #[test]
+    fn test_inpaint_preserves_unmasked_pixels() {
+        let w = 100;
+        let h = 100;
+        let linear_16bit = vec![30000u16; w * h * 3];
+        let work_orig_u8 = vec![128u8; w * h * 3];
+        let meta = make_meta(w, h);
+        let spot = make_spot("1", 50.0, 50.0, 4.0);
+
+        let params = InpaintParams {
+            inpaint_radius: 8.0,
+            preserve_grain: false,
+            spots: vec![spot],
+            manual_strokes: vec![],
+        };
+
+        let (healed_16, _healed_work, _mask, inpainted_px, roi_cnt) =
+            inpaint_linear16_and_work_srgb_in_memory(&linear_16bit, &work_orig_u8, &meta, &params);
+
+        assert!(inpainted_px > 0);
+        assert_eq!(roi_cnt, 1);
+        // Pixels far away from spot (e.g. at (10, 10)) must be exactly bit-identical
+        let far_idx = (10 * w + 10) * 3;
+        assert_eq!(healed_16[far_idx], 30000u16);
+        assert_eq!(healed_16[far_idx + 1], 30000u16);
+        assert_eq!(healed_16[far_idx + 2], 30000u16);
+    }
+}
+

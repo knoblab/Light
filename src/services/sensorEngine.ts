@@ -88,6 +88,9 @@ export class UnifiedSensorEngine {
   private worker: Worker | null = null;
   private reqCounter = 0;
   private pending = new Map<number, PendingRequest>();
+  private lastInpaintUrls: { previewInpainted?: string; maskFinal?: string } = {};
+  private lastDetectUrls: { vizBwEdge?: string; maskAuto?: string } = {};
+  private lastUploadUrls: { previewOriginal?: string; vizBwEdge?: string; maskAuto?: string } = {};
 
   constructor() {
     this.transport = detectRuntimeTransport();
@@ -204,11 +207,16 @@ export class UnifiedSensorEngine {
       onProgress
     );
 
+    if (this.lastUploadUrls.previewOriginal) URL.revokeObjectURL(this.lastUploadUrls.previewOriginal);
+    if (this.lastUploadUrls.vizBwEdge) URL.revokeObjectURL(this.lastUploadUrls.vizBwEdge);
+    if (this.lastUploadUrls.maskAuto) URL.revokeObjectURL(this.lastUploadUrls.maskAuto);
+
     const urls: SessionUrls = {
       previewOriginal: URL.createObjectURL(res.blobs.previewOriginalBlob),
       vizBwEdge: URL.createObjectURL(res.blobs.vizBwEdgeBlob),
       maskAuto: URL.createObjectURL(res.blobs.maskAutoBlob),
     };
+    this.lastUploadUrls = { ...urls };
 
     return {
       sessionId: res.sessionId,
@@ -239,11 +247,19 @@ export class UnifiedSensorEngine {
     }
 
     const res = await this.callWorker('detect', { sessionId, params }, [], onProgress);
+
+    if (this.lastDetectUrls.vizBwEdge) URL.revokeObjectURL(this.lastDetectUrls.vizBwEdge);
+    if (this.lastDetectUrls.maskAuto) URL.revokeObjectURL(this.lastDetectUrls.maskAuto);
+
+    const vizBwEdge = URL.createObjectURL(res.blobs.vizBwEdgeBlob);
+    const maskAuto = URL.createObjectURL(res.blobs.maskAutoBlob);
+    this.lastDetectUrls = { vizBwEdge, maskAuto };
+
     return {
       detection: res.detection,
       urls: {
-        vizBwEdge: URL.createObjectURL(res.blobs.vizBwEdgeBlob),
-        maskAuto: URL.createObjectURL(res.blobs.maskAutoBlob),
+        vizBwEdge,
+        maskAuto,
       },
     };
   }
@@ -287,11 +303,18 @@ export class UnifiedSensorEngine {
       onProgress
     );
 
+    if (this.lastInpaintUrls.previewInpainted) URL.revokeObjectURL(this.lastInpaintUrls.previewInpainted);
+    if (this.lastInpaintUrls.maskFinal) URL.revokeObjectURL(this.lastInpaintUrls.maskFinal);
+
+    const previewInpainted = URL.createObjectURL(res.blobs.previewInpaintedBlob);
+    const maskFinal = URL.createObjectURL(res.blobs.maskFinalBlob);
+    this.lastInpaintUrls = { previewInpainted, maskFinal };
+
     return {
       inpaintResult: res.inpaintResult,
       urls: {
-        previewInpainted: URL.createObjectURL(res.blobs.previewInpaintedBlob),
-        maskFinal: URL.createObjectURL(res.blobs.maskFinalBlob),
+        previewInpainted,
+        maskFinal,
       },
     };
   }

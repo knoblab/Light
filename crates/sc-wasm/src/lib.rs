@@ -314,14 +314,14 @@ pub fn wasm_inpaint_core(session_id: &str, params: InpaintParams) -> Result<Inpa
                 &params,
             );
 
-        session.healed_linear_16bit = Some(healed_16bit);
-        session.work_healed_srgb_u8 = Some(healed_work_u8.clone());
-        session.healed_cfa = None;
-
         let mut jpeg_bytes = Vec::new();
         let enc = jpeg_encoder::Encoder::new(&mut jpeg_bytes, 92);
         let _ = enc.encode(&healed_work_u8, ww as u16, wh as u16, jpeg_encoder::ColorType::Rgb);
         let preview_healed_base64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+
+        session.healed_linear_16bit = Some(healed_16bit);
+        session.work_healed_srgb_u8 = Some(healed_work_u8);
+        session.healed_cfa = None;
 
         let mask_png = encode_png_gray_bytes(&work_mask, ww, wh)?;
         let mask_final_png_base64 = base64::engine::general_purpose::STANDARD.encode(&mask_png);
