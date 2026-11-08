@@ -15,8 +15,8 @@ pub mod native_heal;
 pub mod npy;
 
 pub use native_heal::{
-    build_combined_mask, export_healed_image_native, inpaint_16bit_linear_native, write_jpeg_rgb,
-    write_png_gray, write_png_rgb,
+    build_combined_mask, export_healed_image_native, inpaint_16bit_linear_native,
+    inpaint_linear16_and_work_srgb_in_memory, write_jpeg_rgb, write_png_gray, write_png_rgb,
 };
 pub use npy::{
     read_npy_f32, read_npy_u8, read_npy_u16, write_npy_f32, write_npy_u8, write_npy_u16,

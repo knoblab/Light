@@ -59,6 +59,39 @@ fn test_wasm_session_lifecycle() {
     let tile_bytes = wasm_render_tile_core(session_id, "original", 0, 0, 0).unwrap();
     assert_eq!(tile_bytes.len(), 256 * 256 * 4);
 
+    // Inpaint with manual brush stroke
+    let stroke = sc_core::ManualBrushStroke {
+        id: "stroke_1".into(),
+        mode: "heal".into(),
+        radius: 4.0,
+        points: vec![
+            sc_core::BrushPoint { x: 10.0, y: 10.0 },
+            sc_core::BrushPoint { x: 12.0, y: 12.0 },
+        ],
+    };
+    let inpaint_params_stroke = InpaintParams {
+        spots: vec![],
+        manual_strokes: vec![stroke],
+        inpaint_radius: 5.0,
+        preserve_grain: true,
+    };
+    let heal_stroke = wasm_inpaint_core(session_id, inpaint_params_stroke).unwrap();
+    assert!(heal_stroke.success);
+    assert_eq!(heal_stroke.result.healed_spots_count, 1);
+    assert!(heal_stroke.result.inpainted_pixels > 0);
+
+    // Render tile of healed layer
+    let tile_healed = wasm_render_tile_core(session_id, "healed", 0, 0, 0).unwrap();
+    assert_eq!(tile_healed.len(), 256 * 256 * 4);
+
+    // Export formats (TIFF16, PNG, JPEG)
+    let exported_tiff = wasm_export_file_core(session_id, "tiff16", None).unwrap();
+    assert!(!exported_tiff.is_empty());
+    let exported_png = wasm_export_file_core(session_id, "png", None).unwrap();
+    assert_eq!(&exported_png[0..8], b"\x89PNG\r\n\x1a\n");
+    let exported_jpg = wasm_export_file_core(session_id, "jpeg", None).unwrap();
+    assert_eq!(&exported_jpg[0..2], b"\xff\xd8");
+
     // Export DNG
     let exported_dng = wasm_export_file_core(session_id, "dng", None).unwrap();
     assert!(!exported_dng.is_empty());

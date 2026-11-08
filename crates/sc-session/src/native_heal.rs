@@ -246,18 +246,14 @@ fn telea_harmonic_fill_roi(
     filled
 }
 
-/// Runs 16-bit Plane-Detrended Harmonic + Telea Inpainting on `session_dir`,
-/// guaranteeing bit-identical pixels outside the healed spot/stroke masks.
-pub fn inpaint_16bit_linear_native(
-    session_dir: &Path,
+/// Pure in-memory 16-bit Plane-Detrended Harmonic + Telea inpainting on `linear_16bit` and `work_orig_u8`.
+/// Returns `(healed_16bit, healed_work_u8, work_mask, inpainted_pixels, roi_count)`.
+pub fn inpaint_linear16_and_work_srgb_in_memory(
+    linear_16bit: &[u16],
+    work_orig_u8: &[u8],
+    meta: &SessionMetadata,
     params: &InpaintParams,
-) -> Result<InpaintResult> {
-    let meta_str = std::fs::read_to_string(session_dir.join("session_meta.json"))?;
-    let meta: SessionMetadata = serde_json::from_str(&meta_str)?;
-
-    let (_, linear_16bit) = read_npy_u16(&session_dir.join("linear_16bit.npy"))?;
-    let (_, work_orig_u8) = read_npy_u8(&session_dir.join("work_srgb_u8.npy"))?;
-
+) -> (Vec<u16>, Vec<u8>, Vec<u8>, usize, usize) {
     let full_w = meta.full_width;
     let full_h = meta.full_height;
     let work_w = meta.work_width;
@@ -280,12 +276,11 @@ pub fn inpaint_16bit_linear_native(
         &params.spots,
         &params.manual_strokes,
     );
-    write_png_gray(&session_dir.join("mask_final_work.png"), &work_mask, work_w, work_h)?;
 
     let full_mask = if (full_w, full_h) != (work_w, work_h) {
         resize_nearest_u8(&work_mask, work_w, work_h, full_w, full_h)
     } else {
-        work_mask
+        work_mask.clone()
     };
 
     let kw_skirt = skirt_pad_px * 2 + 1;
@@ -293,15 +288,8 @@ pub fn inpaint_16bit_linear_native(
     let full_mask_core = dilate_u8(&full_mask, full_w, full_h, kw_skirt, kw_skirt, &k_skirt);
     let inpainted_pixels = full_mask_core.iter().filter(|&&v| v != 0).count();
 
-    let enabled_spot_count = params.spots.iter().filter(|s| s.enabled).count()
-        + params
-            .manual_strokes
-            .iter()
-            .filter(|st| st.mode != "erase" && !st.points.is_empty())
-            .count();
-
-    let mut healed_16bit = linear_16bit.clone();
-    let mut healed_work_u8 = work_orig_u8;
+    let mut healed_16bit = linear_16bit.to_vec();
+    let mut healed_work_u8 = work_orig_u8.to_vec();
     let mut roi_count = 0usize;
 
     if inpainted_pixels > 0 {
@@ -525,6 +513,38 @@ pub fn inpaint_16bit_linear_native(
             }
         }
     }
+
+    (healed_16bit, healed_work_u8, work_mask, inpainted_pixels, roi_count)
+}
+
+/// Runs 16-bit Plane-Detrended Harmonic + Telea Inpainting on `session_dir`,
+/// guaranteeing bit-identical pixels outside the healed spot/stroke masks.
+pub fn inpaint_16bit_linear_native(
+    session_dir: &Path,
+    params: &InpaintParams,
+) -> Result<InpaintResult> {
+    let meta_str = std::fs::read_to_string(session_dir.join("session_meta.json"))?;
+    let meta: SessionMetadata = serde_json::from_str(&meta_str)?;
+
+    let (_, linear_16bit) = read_npy_u16(&session_dir.join("linear_16bit.npy"))?;
+    let (_, work_orig_u8) = read_npy_u8(&session_dir.join("work_srgb_u8.npy"))?;
+
+    let full_w = meta.full_width;
+    let full_h = meta.full_height;
+    let work_w = meta.work_width;
+    let work_h = meta.work_height;
+
+    let (healed_16bit, healed_work_u8, work_mask, inpainted_pixels, roi_count) =
+        inpaint_linear16_and_work_srgb_in_memory(&linear_16bit, &work_orig_u8, &meta, params);
+
+    write_png_gray(&session_dir.join("mask_final_work.png"), &work_mask, work_w, work_h)?;
+
+    let enabled_spot_count = params.spots.iter().filter(|s| s.enabled).count()
+        + params
+            .manual_strokes
+            .iter()
+            .filter(|st| st.mode != "erase" && !st.points.is_empty())
+            .count();
 
     let cfa_raw_path = session_dir.join("cfa_raw.npy");
     let has_cfa = if cfa_raw_path.exists() {

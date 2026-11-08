@@ -166,12 +166,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 20, '16-bit 센서 CFA 4단계 인페인팅 연산 중');
+      sendProgress(id, 20, '16-bit 센서 국소 영역 평면 디트렌딩 인페인팅 중');
       const res = wasm_inpaint(sessionId, {
         spots: spots || [],
-        manual_strokes: manualStrokes || [],
-        inpaint_radius: inpaintRadius,
-        preserve_grain: preserveGrain,
+        manualStrokes: manualStrokes || [],
+        inpaintRadius,
+        preserveGrain,
       });
 
       sendProgress(id, 90, '복원 미리보기 인코딩 중');
@@ -223,12 +223,12 @@ self.onmessage = async (event: MessageEvent) => {
         preserveGrain: boolean;
       } = payload;
 
-      sendProgress(id, 20, '16-bit CFA 복원 및 검증 중');
+      sendProgress(id, 20, '16-bit 복원 및 검증 중');
       const inpaintRes = wasm_inpaint(sessionId, {
         spots: spots || [],
-        manual_strokes: manualStrokes || [],
-        inpaint_radius: inpaintRadius,
-        preserve_grain: preserveGrain,
+        manualStrokes: manualStrokes || [],
+        inpaintRadius,
+        preserveGrain,
       });
 
       sendProgress(id, 70, `${format.toUpperCase()} 파일 인코딩 중`);
@@ -301,10 +301,10 @@ self.onmessage = async (event: MessageEvent) => {
       sendProgress(id, 92, '다중 프레임 불변 센서 먼지 교차 매칭 중');
       const sessionIds = processedList.map((p) => p.sessionId);
       const multiReport = wasm_multi_detect({
-        session_dirs: sessionIds,
-        tolerance_px: 14.0,
-        min_frames_match: 2,
-        default_method: params.method || 'dual',
+        sessionDirs: sessionIds,
+        tolerancePx: 14.0,
+        minFramesMatch: 2,
+        defaultMethod: params.method || 'dual',
       });
 
       sendProgress(id, 100, '연속 사진 로딩 및 교차 분석 완료');
@@ -339,10 +339,10 @@ self.onmessage = async (event: MessageEvent) => {
 
       sendProgress(id, 75, '센서 불변 먼지 클러스터링 계산 중');
       const multiReport = wasm_multi_detect({
-        session_dirs: sessionIds,
-        tolerance_px: tolerancePx,
-        min_frames_match: minFramesMatch,
-        default_method: params.method || 'dual',
+        sessionDirs: sessionIds,
+        tolerancePx,
+        minFramesMatch,
+        defaultMethod: params.method || 'dual',
       });
 
       sendProgress(id, 100, '연속 사진 재분석 완료');
@@ -380,9 +380,9 @@ self.onmessage = async (event: MessageEvent) => {
 
         wasm_inpaint(it.sessionId, {
           spots: it.spots || [],
-          manual_strokes: it.manualStrokes || [],
-          inpaint_radius: it.params?.inpaintRadius ?? 6,
-          preserve_grain: it.params?.preserveGrain ?? true,
+          manualStrokes: it.manualStrokes || [],
+          inpaintRadius: it.params?.inpaintRadius ?? 6,
+          preserveGrain: it.params?.preserveGrain ?? true,
         });
 
         const fileBytes = wasm_export_file(it.sessionId, format, colorSpace);

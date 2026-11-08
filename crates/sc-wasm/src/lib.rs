@@ -39,12 +39,14 @@ pub struct WasmSession {
     pub cfa_height: usize,
     pub healed_cfa: Option<Vec<u16>>,
     pub linear_16bit: Vec<u16>,
+    pub healed_linear_16bit: Option<Vec<u16>>,
     pub work_srgb_u8: Vec<u8>,
     pub work_healed_srgb_u8: Option<Vec<u8>>,
     pub det_gray: Vec<f32>,
     pub spots: Vec<DetectedDustSpot>,
     pub multi_confirmed: HashSet<usize>,
     pub cancel_token: CancelToken,
+    pub cfa_roi_cache: sc_heal::roi_cache::RoiCache,
 }
 
 static SESSIONS: Mutex<Option<HashMap<String, WasmSession>>> = Mutex::new(None);
@@ -170,12 +172,14 @@ pub fn wasm_ingest_and_detect_core(
         cfa_height: cfa_h,
         healed_cfa: None,
         linear_16bit: ingested.linear_16bit,
+        healed_linear_16bit: None,
         work_srgb_u8: ingested.work_srgb_u8,
         work_healed_srgb_u8: None,
         det_gray: ingested.det_gray,
         spots: det_result.spots.clone(),
         multi_confirmed: HashSet::new(),
         cancel_token: CancelToken::new(),
+        cfa_roi_cache: sc_heal::roi_cache::RoiCache::new(),
     };
 
     with_sessions(|s| {
@@ -238,6 +242,17 @@ pub fn wasm_detect_core(session_id: &str, params: DetectionParams) -> Result<Det
     })
 }
 
+fn encode_png_gray_bytes(gray: &[u8], w: usize, h: usize) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut encoder = png::Encoder::new(&mut out, w as u32, h as u32);
+    encoder.set_color(png::ColorType::Grayscale);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(|e| format!("PNG header error: {e}"))?;
+    writer.write_image_data(gray).map_err(|e| format!("PNG write error: {e}"))?;
+    drop(writer);
+    Ok(out)
+}
+
 pub fn wasm_inpaint_core(session_id: &str, params: InpaintParams) -> Result<InpaintResponse, String> {
     with_sessions(|sessions| {
         let session = sessions
@@ -249,152 +264,86 @@ pub fn wasm_inpaint_core(session_id: &str, params: InpaintParams) -> Result<Inpa
         let ww = session.meta.work_width;
         let wh = session.meta.work_height;
 
-        let pattern = match session.meta.bayer_pattern.to_ascii_uppercase().as_str() {
-            "BGGR" => BayerPattern::BgGr,
-            "GRBG" => BayerPattern::GrBg,
-            "GBRG" => BayerPattern::GbRg,
-            _ => BayerPattern::RgGb,
-        };
+        let enabled_spots_count = params.spots.iter().filter(|s| s.enabled).count();
+        let active_strokes_count = params
+            .manual_strokes
+            .iter()
+            .filter(|st| st.mode != "erase" && !st.points.is_empty())
+            .count();
 
-        let spots_to_heal = if params.spots.is_empty() {
-            &session.spots[..]
-        } else {
-            &params.spots[..]
-        };
+        if enabled_spots_count == 0 && active_strokes_count == 0 {
+            session.healed_linear_16bit = None;
+            session.work_healed_srgb_u8 = None;
+            session.healed_cfa = None;
 
-        let mut inpainted_pixels = 0usize;
+            let mut jpeg_bytes = Vec::new();
+            let enc = jpeg_encoder::Encoder::new(&mut jpeg_bytes, 92);
+            let _ = enc.encode(&session.work_srgb_u8, ww as u16, wh as u16, jpeg_encoder::ColorType::Rgb);
+            let preview_healed_base64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
 
-        if let Some(ref cfa) = session.raw_cfa {
-            let (cw, ch) = (session.cfa_width, session.cfa_height);
-            let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = session.meta.raw_crop {
-                (cx, cy)
-            } else if cw > fw && ch > fh {
-                (((cw - fw) / 2) & !1, ((ch - fh) / 2) & !1)
-            } else {
-                (0, 0)
+            let empty_mask = vec![0u8; ww * wh];
+            let mask_png = encode_png_gray_bytes(&empty_mask, ww, wh)?;
+            let mask_final_png_base64 = base64::engine::general_purpose::STANDARD.encode(&mask_png);
+
+            let res = InpaintResult {
+                healed_spots_count: 0,
+                inpainted_pixels: 0,
+                inpainted_area_pct: 0.0,
+                bit_depth: session.meta.bit_depth.clone(),
+                inpaint_method: "16-bit Plane-Detrended Harmonic Telea (WASM)".into(),
+                inpaint_radius: params.inpaint_radius,
+                full_width: fw,
+                full_height: fh,
+                from_cache: false,
+                incremental_rois: 0,
             };
-            let cfa_spots: Vec<DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
-                spots_to_heal
-                    .iter()
-                    .map(|s| {
-                        let mut s2 = s.clone();
-                        s2.cx += crop_x as f64;
-                        s2.cy += crop_y as f64;
-                        s2
-                    })
-                    .collect()
-            } else {
-                spots_to_heal.to_vec()
-            };
-            let cfa_strokes: Vec<ManualBrushStroke> = if crop_x > 0 || crop_y > 0 {
-                params
-                    .manual_strokes
-                    .iter()
-                    .map(|st| {
-                        let mut st2 = st.clone();
-                        for pt in &mut st2.points {
-                            pt.x += crop_x as f64;
-                            pt.y += crop_y as f64;
-                        }
-                        st2
-                    })
-                    .collect()
-            } else {
-                params.manual_strokes.clone()
-            };
-            let (healed, modified_count) = heal_cfa_image_cancellable(
-                cfa,
-                cw,
-                ch,
-                &cfa_spots,
-                &cfa_strokes,
-                pattern,
-                params.inpaint_radius,
-                params.preserve_grain,
-                42,
-                None,
-                Some(&session.cancel_token),
-            )
-            .map_err(|e| format!("Heal failed: {e}"))?;
 
-            inpainted_pixels = modified_count;
-            session.healed_cfa = Some(healed);
+            return Ok(InpaintResponse {
+                success: true,
+                result: res,
+                preview_healed_base64,
+                mask_final_png_base64,
+            });
         }
 
-        let mut healed_srgb = session.work_srgb_u8.clone();
-        let scale_x = ww as f64 / fw.max(1) as f64;
-        let scale_y = wh as f64 / fh.max(1) as f64;
-        for s in spots_to_heal {
-            let cx = (s.cx * scale_x).round() as isize;
-            let cy = (s.cy * scale_y).round() as isize;
-            let r = ((s.radius.max(3.0) + params.inpaint_radius) * scale_x).ceil() as isize;
-            for dy in -r..=r {
-                let py = cy + dy;
-                if py < 0 || py >= wh as isize {
-                    continue;
-                }
-                for dx in -r..=r {
-                    let px = cx + dx;
-                    if px < 0 || px >= ww as isize || dx * dx + dy * dy > r * r {
-                        continue;
-                    }
-                    let idx = (py as usize * ww + px as usize) * 3;
-                    let ref_idx = (py.clamp(0, wh as isize - 1) as usize * ww + (px - dx).clamp(0, ww as isize - 1) as usize) * 3;
-                    healed_srgb[idx] = session.work_srgb_u8[ref_idx];
-                    healed_srgb[idx + 1] = session.work_srgb_u8[ref_idx + 1];
-                    healed_srgb[idx + 2] = session.work_srgb_u8[ref_idx + 2];
-                }
-            }
-        }
-        session.work_healed_srgb_u8 = Some(healed_srgb.clone());
+        let (healed_16bit, healed_work_u8, work_mask, inpainted_pixels, roi_count) =
+            sc_session::inpaint_linear16_and_work_srgb_in_memory(
+                &session.linear_16bit,
+                &session.work_srgb_u8,
+                &session.meta,
+                &params,
+            );
+
+        session.healed_linear_16bit = Some(healed_16bit);
+        session.work_healed_srgb_u8 = Some(healed_work_u8.clone());
+        session.healed_cfa = None;
 
         let mut jpeg_bytes = Vec::new();
         let enc = jpeg_encoder::Encoder::new(&mut jpeg_bytes, 92);
-        let _ = enc.encode(&healed_srgb, ww as u16, wh as u16, jpeg_encoder::ColorType::Rgb);
+        let _ = enc.encode(&healed_work_u8, ww as u16, wh as u16, jpeg_encoder::ColorType::Rgb);
         let preview_healed_base64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
 
-        let mut mask_u8 = vec![0u8; ww * wh];
-        for s in spots_to_heal {
-            let cx = (s.cx * scale_x).round() as isize;
-            let cy = (s.cy * scale_y).round() as isize;
-            let r = ((s.radius.max(3.0) + params.inpaint_radius) * scale_x).ceil() as isize;
-            for dy in -r..=r {
-                let py = cy + dy;
-                if py < 0 || py >= wh as isize {
-                    continue;
-                }
-                for dx in -r..=r {
-                    let px = cx + dx;
-                    if px < 0 || px >= ww as isize || dx * dx + dy * dy > r * r {
-                        continue;
-                    }
-                    mask_u8[py as usize * ww + px as usize] = 255;
-                }
-            }
-        }
-        let mut mask_bytes = Vec::new();
-        let enc_mask = jpeg_encoder::Encoder::new(&mut mask_bytes, 92);
-        let _ = enc_mask.encode(&mask_u8, ww as u16, wh as u16, jpeg_encoder::ColorType::Luma);
-        let mask_final_png_base64 = base64::engine::general_purpose::STANDARD.encode(&mask_bytes);
+        let mask_png = encode_png_gray_bytes(&work_mask, ww, wh)?;
+        let mask_final_png_base64 = base64::engine::general_purpose::STANDARD.encode(&mask_png);
 
         let total_pixels = fw * fh;
         let area_pct = if total_pixels > 0 {
-            (inpainted_pixels as f64 / total_pixels as f64) * 100.0
+            ((inpainted_pixels as f64 / total_pixels as f64) * 100.0 * 10000.0).round() / 10000.0
         } else {
             0.0
         };
 
         let res = InpaintResult {
-            healed_spots_count: spots_to_heal.len(),
+            healed_spots_count: enabled_spots_count + active_strokes_count,
             inpainted_pixels,
             inpainted_area_pct: area_pct,
             bit_depth: session.meta.bit_depth.clone(),
-            inpaint_method: "cfa_4phase_telea".into(),
+            inpaint_method: "16-bit Plane-Detrended Harmonic Telea (WASM)".into(),
             inpaint_radius: params.inpaint_radius,
             full_width: fw,
             full_height: fh,
             from_cache: false,
-            incremental_rois: 0,
+            incremental_rois: roi_count,
         };
 
         Ok(InpaintResponse {
@@ -428,11 +377,17 @@ pub fn wasm_render_tile_core(
 
         let mut rgba = vec![0u8; tile_size * tile_size * 4];
 
-        let use_healed = layer == "healed" && session.healed_cfa.is_some();
-        let cfa_buf = if use_healed {
-            session.healed_cfa.as_deref()
+        let use_healed = layer == "healed";
+        let source_16 = if use_healed {
+            session.healed_linear_16bit.as_deref().unwrap_or(&session.linear_16bit)
         } else {
-            session.raw_cfa.as_deref()
+            &session.linear_16bit
+        };
+
+        let lut_u8 = if !session.meta.is_input_16_bit {
+            Some(sc_color::build_srgb_u8_lut(session.meta.exposure_scale))
+        } else {
+            None
         };
 
         for y in 0..tile_size {
@@ -447,17 +402,17 @@ pub fn wasm_render_tile_core(
                 }
                 let out_idx = (y * tile_size + x) * 4;
 
-                if let Some(cfa) = cfa_buf {
-                    let val = (cfa[img_y * fw + img_x] >> 8) as u8;
-                    rgba[out_idx] = val;
-                    rgba[out_idx + 1] = val;
-                    rgba[out_idx + 2] = val;
-                    rgba[out_idx + 3] = 255;
-                } else if !session.linear_16bit.is_empty() {
+                if !source_16.is_empty() {
                     let in_idx = (img_y * fw + img_x) * 3;
-                    rgba[out_idx] = (session.linear_16bit[in_idx] >> 8) as u8;
-                    rgba[out_idx + 1] = (session.linear_16bit[in_idx + 1] >> 8) as u8;
-                    rgba[out_idx + 2] = (session.linear_16bit[in_idx + 2] >> 8) as u8;
+                    if let Some(ref lut) = lut_u8 {
+                        rgba[out_idx] = lut[source_16[in_idx] as usize];
+                        rgba[out_idx + 1] = lut[source_16[in_idx + 1] as usize];
+                        rgba[out_idx + 2] = lut[source_16[in_idx + 2] as usize];
+                    } else {
+                        rgba[out_idx] = (source_16[in_idx] as f32 / 257.0).round().clamp(0.0, 255.0) as u8;
+                        rgba[out_idx + 1] = (source_16[in_idx + 1] as f32 / 257.0).round().clamp(0.0, 255.0) as u8;
+                        rgba[out_idx + 2] = (source_16[in_idx + 2] as f32 / 257.0).round().clamp(0.0, 255.0) as u8;
+                    }
                     rgba[out_idx + 3] = 255;
                 }
             }
@@ -474,7 +429,7 @@ pub fn wasm_export_file_core(
 ) -> Result<Vec<u8>, String> {
     with_sessions(|sessions| {
         let session = sessions
-            .get(session_id)
+            .get_mut(session_id)
             .ok_or_else(|| "Session not found".to_string())?;
 
         let space = match color_space.as_deref().unwrap_or("srgb").to_ascii_lowercase().as_str() {
@@ -487,15 +442,77 @@ pub fn wasm_export_file_core(
         let fw = session.meta.full_width;
         let fh = session.meta.full_height;
 
+        let source_16 = session
+            .healed_linear_16bit
+            .as_deref()
+            .unwrap_or(&session.linear_16bit);
+
         match format.to_ascii_lowercase().as_str() {
             "dng" => {
-                let cfa = session
-                    .healed_cfa
-                    .as_deref()
-                    .or(session.raw_cfa.as_deref())
-                    .ok_or_else(|| "CFA raw buffer unavailable for DNG export".to_string())?;
-                write_cfa_dng_bytes(cfa, session.cfa_width, session.cfa_height, &session.meta)
-                    .map_err(|e| format!("DNG export failed: {e}"))
+                if let Some(ref raw_cfa) = session.raw_cfa {
+                    let (cw, ch) = (session.cfa_width, session.cfa_height);
+                    let (crop_x, crop_y) = if let Some([cx, cy, _, _]) = session.meta.raw_crop {
+                        (cx, cy)
+                    } else if cw > fw && ch > fh {
+                        (((cw - fw) / 2) & !1, ((ch - fh) / 2) & !1)
+                    } else {
+                        (0, 0)
+                    };
+                    let pattern = match session.meta.bayer_pattern.to_ascii_uppercase().as_str() {
+                        "BGGR" => BayerPattern::BgGr,
+                        "GRBG" => BayerPattern::GrBg,
+                        "GBRG" => BayerPattern::GbRg,
+                        _ => BayerPattern::RgGb,
+                    };
+                    let cfa_spots: Vec<DetectedDustSpot> = if crop_x > 0 || crop_y > 0 {
+                        session.spots
+                            .iter()
+                            .filter(|s| s.enabled)
+                            .map(|s| {
+                                let mut s2 = s.clone();
+                                s2.cx += crop_x as f64;
+                                s2.cy += crop_y as f64;
+                                s2
+                            })
+                            .collect()
+                    } else {
+                        session.spots.iter().filter(|s| s.enabled).cloned().collect()
+                    };
+
+                    let (healed, _) = heal_cfa_image_cancellable(
+                        raw_cfa,
+                        cw,
+                        ch,
+                        &cfa_spots,
+                        &[],
+                        pattern,
+                        6.0,
+                        true,
+                        42,
+                        Some(&mut session.cfa_roi_cache),
+                        Some(&session.cancel_token),
+                    )
+                    .map_err(|e| format!("CFA heal failed: {e}"))?;
+
+                    session.healed_cfa = Some(healed.clone());
+
+                    write_cfa_dng_bytes(&healed, session.cfa_width, session.cfa_height, &session.meta)
+                        .map_err(|e| format!("DNG export failed: {e}"))
+                } else {
+                    let srgb16 = if session.meta.is_input_16_bit {
+                        source_16.to_vec()
+                    } else {
+                        sc_color::linear_16bit_to_srgb_16bit(source_16, fw, fh, Some(session.meta.exposure_scale)).0
+                    };
+                    write_rendered_tiff16_bytes(
+                        &srgb16,
+                        fw,
+                        fh,
+                        space,
+                        &session.meta,
+                    )
+                    .map_err(|e| format!("DNG linear fallback failed: {e}"))
+                }
             }
             "xmp" => {
                 let dummy_cfa = vec![0u16; 64];
@@ -514,8 +531,13 @@ pub fn wasm_export_file_core(
                 Ok(xml.into_bytes())
             }
             "tiff16" | "tiff" => {
+                let srgb16 = if session.meta.is_input_16_bit {
+                    source_16.to_vec()
+                } else {
+                    sc_color::linear_16bit_to_srgb_16bit(source_16, fw, fh, Some(session.meta.exposure_scale)).0
+                };
                 write_rendered_tiff16_bytes(
-                    &session.linear_16bit,
+                    &srgb16,
                     fw,
                     fh,
                     space,
@@ -524,8 +546,13 @@ pub fn wasm_export_file_core(
                 .map_err(|e| format!("TIFF16 export failed: {e}"))
             }
             "png16" => {
+                let srgb16 = if session.meta.is_input_16_bit {
+                    source_16.to_vec()
+                } else {
+                    sc_color::linear_16bit_to_srgb_16bit(source_16, fw, fh, Some(session.meta.exposure_scale)).0
+                };
                 write_rendered_png16_bytes(
-                    &session.linear_16bit,
+                    &srgb16,
                     fw,
                     fh,
                     space,
@@ -534,21 +561,27 @@ pub fn wasm_export_file_core(
                 .map_err(|e| format!("PNG16 export failed: {e}"))
             }
             "png" | "png8" => {
-                let rgb8: Vec<u8> = session
-                    .linear_16bit
-                    .iter()
-                    .map(|&v| (v >> 8) as u8)
-                    .collect();
-                write_rendered_png8_bytes(&rgb8, fw, fh, space, &session.meta)
+                let srgb8 = if session.meta.is_input_16_bit {
+                    source_16
+                        .iter()
+                        .map(|&v| (v as f32 / 257.0).round().clamp(0.0, 255.0) as u8)
+                        .collect()
+                } else {
+                    sc_color::linear_16bit_to_srgb_8bit(source_16, fw, fh, Some(session.meta.exposure_scale)).0
+                };
+                write_rendered_png8_bytes(&srgb8, fw, fh, space, &session.meta)
                     .map_err(|e| format!("PNG export failed: {e}"))
             }
             "jpeg" | "jpg" => {
-                let rgb8: Vec<u8> = session
-                    .linear_16bit
-                    .iter()
-                    .map(|&v| (v >> 8) as u8)
-                    .collect();
-                write_rendered_jpeg_bytes(&rgb8, fw, fh, 95, space, &session.meta)
+                let srgb8 = if session.meta.is_input_16_bit {
+                    source_16
+                        .iter()
+                        .map(|&v| (v as f32 / 257.0).round().clamp(0.0, 255.0) as u8)
+                        .collect()
+                } else {
+                    sc_color::linear_16bit_to_srgb_8bit(source_16, fw, fh, Some(session.meta.exposure_scale)).0
+                };
+                write_rendered_jpeg_bytes(&srgb8, fw, fh, 98, space, &session.meta)
                     .map_err(|e| format!("JPEG export failed: {e}"))
             }
             other => Err(format!("Unsupported export format: {other}")),

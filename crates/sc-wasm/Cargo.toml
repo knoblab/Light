@@ -15,6 +15,7 @@ sc-heal = { path = "../sc-heal" }
 sc-dng = { path = "../sc-dng" }
 sc-color = { path = "../sc-color" }
 sc-imgproc = { path = "../sc-imgproc" }
+sc-session = { path = "../sc-session" }
 
 wasm-bindgen = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
@@ -23,6 +24,7 @@ web-sys = { workspace = true, features = ["console"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 jpeg-encoder = { workspace = true }
+png = { workspace = true }
 base64 = "0.21"
 
 [dev-dependencies]

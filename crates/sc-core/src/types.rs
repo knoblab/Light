@@ -315,11 +315,11 @@ pub struct ManualBrushStroke {
 pub struct InpaintParams {
     #[serde(default)]
     pub spots: Vec<DetectedDustSpot>,
-    #[serde(default)]
+    #[serde(default, alias = "manual_strokes")]
     pub manual_strokes: Vec<ManualBrushStroke>,
-    #[serde(default = "default_inpaint_radius")]
+    #[serde(default = "default_inpaint_radius", alias = "inpaint_radius")]
     pub inpaint_radius: f64,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", alias = "preserve_grain")]
     pub preserve_grain: bool,
 }
 
@@ -391,14 +391,15 @@ pub struct MultiFrameReport {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MultiFrameConfig {
+    #[serde(alias = "session_dirs")]
     pub session_dirs: Vec<String>,
-    #[serde(default = "default_tolerance_px")]
+    #[serde(default = "default_tolerance_px", alias = "tolerance_px")]
     pub tolerance_px: f64,
-    #[serde(default = "default_min_frames_match")]
+    #[serde(default = "default_min_frames_match", alias = "min_frames_match")]
     pub min_frames_match: usize,
-    #[serde(default)]
+    #[serde(default, alias = "detection_params")]
     pub detection_params: DetectionParams,
-    #[serde(default)]
+    #[serde(default, alias = "force_redetect")]
     pub force_redetect: bool,
 }
 
