@@ -14,7 +14,7 @@ use sc_core::{
 };
 use sc_detect::annulus::fast_fit_plane;
 use sc_imgproc::{
-    dilate_u8, draw_filled_circle_u8, draw_thick_line_u8, ellipse_kernel, gaussian_blur_f32,
+    draw_filled_circle_u8, draw_thick_line_u8, gaussian_blur_f32,
 };
 use rayon::prelude::*;
 use std::fs::File;
@@ -484,7 +484,6 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
     let inpaint_r = params.inpaint_radius.clamp(3.0, 25.0);
     let skirt_pad_px = ((inpaint_r * 0.80).round() as usize).max(4);
     let feather_px = ((inpaint_r * 0.90).round() as usize).max(4);
-    let feather_sigma = (feather_px as f64 * 0.65).max(2.5);
     let ring_width_px = ((inpaint_r * 1.6 + 6.0).round() as usize).max(8);
 
     let work_mask = build_combined_mask(
@@ -510,12 +509,6 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
     let mut roi_count = 0usize;
 
     if !bboxes.is_empty() {
-        let kw_skirt = skirt_pad_px * 2 + 1;
-        let k_skirt = ellipse_kernel(kw_skirt, kw_skirt);
-        let kw_feather = feather_px * 2 + 1;
-        let k_feather = ellipse_kernel(kw_feather, kw_feather);
-        let kw_ring = ring_width_px * 2 + 1;
-        let k_ring = ellipse_kernel(kw_ring, kw_ring);
         let lut_u8 = if !is_input_16bit {
             Some(build_srgb_u8_lut(exposure_scale))
         } else {
@@ -530,6 +523,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
             rw: usize,
             rh: usize,
             healed_patch: Vec<u16>,
+            roi_alpha: Vec<f32>,
             core_cnt: usize,
         }
 
@@ -547,39 +541,45 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                     return None;
                 }
 
-                let roi_core = dilate_u8(&roi_mask, rw, rh, kw_skirt, kw_skirt, &k_skirt);
-                let core_cnt = roi_core.iter().filter(|&&v| v != 0).count();
-                if core_cnt == 0 {
-                    return None;
-                }
+                // Exact 2D Euclidean Distance Transform in O(W * H) replaces 3 heavy morphological dilations
+                let d2_map = sc_imgproc::euclidean_distance_transform_sq_u8(&roi_mask, rw, rh);
+                let r_skirt = skirt_pad_px as f32;
+                let r_skirt_sq = (r_skirt * r_skirt) as u32;
+                let r_exp = (skirt_pad_px + feather_px) as f32;
+                let r_exp_sq = (r_exp * r_exp) as u32;
+                let r_ring = (skirt_pad_px + feather_px + ring_width_px) as f32;
+                let r_ring_sq = (r_ring * r_ring) as u32;
 
-                let roi_expanded = dilate_u8(&roi_core, rw, rh, kw_feather, kw_feather, &k_feather);
-
-                let core_f32: Vec<f32> = roi_core.iter().map(|&v| if v > 0 { 1.0f32 } else { 0.0f32 }).collect();
-                let blurred_core = gaussian_blur_f32(&core_f32, rw, rh, feather_sigma);
+                let inv_feather = 1.0f32 / (feather_px as f32).max(1.0);
+                let mut core_cnt = 0usize;
+                let mut roi_expanded = vec![0u8; rw * rh];
                 let mut roi_alpha = vec![0.0f32; rw * rh];
-                for i in 0..(rw * rh) {
-                    if roi_core[i] > 0 {
-                        roi_alpha[i] = 1.0;
-                    } else if roi_expanded[i] > 0 {
-                        let t = (blurred_core[i] * 1.65).clamp(0.0, 1.0);
-                        roi_alpha[i] = t * t * (3.0 - 2.0 * t);
-                    } else {
-                        roi_alpha[i] = 0.0;
-                    }
-                }
-
-                let roi_outer_dilated =
-                    dilate_u8(&roi_expanded, rw, rh, kw_ring, kw_ring, &k_ring);
-
                 let mut ring_coords: Vec<(usize, usize)> = Vec::new();
+
                 for y in 0..rh {
                     for x in 0..rw {
-                        let r_idx = y * rw + x;
-                        if roi_outer_dilated[r_idx] > 0 && roi_expanded[r_idx] == 0 {
-                            ring_coords.push((x, y));
+                        let i = y * rw + x;
+                        let d2 = d2_map[i];
+                        if d2 <= r_skirt_sq {
+                            core_cnt += 1;
+                            roi_expanded[i] = 255;
+                            roi_alpha[i] = 1.0;
+                        } else if d2 <= r_exp_sq {
+                            roi_expanded[i] = 255;
+                            let d = (d2 as f32).sqrt();
+                            let t = ((r_exp - d) * inv_feather).clamp(0.0, 1.0);
+                            roi_alpha[i] = t * t * (3.0 - 2.0 * t);
+                        } else {
+                            roi_alpha[i] = 0.0;
+                            if d2 <= r_ring_sq {
+                                ring_coords.push((x, y));
+                            }
                         }
                     }
+                }
+
+                if core_cnt == 0 {
+                    return None;
                 }
 
                 let half_rw = (rw as f32 * 0.5).max(1.0);
@@ -642,6 +642,32 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                 let harm_sigma = (rw.min(rh) as f64 * 0.10).clamp(2.0, 8.0);
                 let mut healed_patch = vec![0u16; rw * rh * 3];
 
+                // Gather 3-channel original patch data and boundary min/max for overshoot guard
+                let mut roi_orig_3ch = [vec![0.0f32; rw * rh], vec![0.0f32; rw * rh], vec![0.0f32; rw * rh]];
+                let mut ring_min = [f32::INFINITY; 3];
+                let mut ring_max = [f32::NEG_INFINITY; 3];
+
+                for y in 0..rh {
+                    let d_row = y * rw;
+                    let s_row = (by1 + y) * full_w + bx1;
+                    for x in 0..rw {
+                        let s_idx = (s_row + x) * 3;
+                        let d_idx = d_row + x;
+                        roi_orig_3ch[0][d_idx] = linear_16bit[s_idx] as f32;
+                        roi_orig_3ch[1][d_idx] = linear_16bit[s_idx + 1] as f32;
+                        roi_orig_3ch[2][d_idx] = linear_16bit[s_idx + 2] as f32;
+                    }
+                }
+
+                for &(x, y) in &ring_coords {
+                    let idx = y * rw + x;
+                    for c in 0..3 {
+                        let v = roi_orig_3ch[c][idx];
+                        ring_min[c] = ring_min[c].min(v);
+                        ring_max[c] = ring_max[c].max(v);
+                    }
+                }
+
                 // Deterministic PRNG seed isolated per patch
                 let mut rng = DeterministicRng::new(
                     42u64
@@ -649,27 +675,29 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                         .wrapping_add(bx1 as u64),
                 );
 
-                for ch in 0..3 {
-                    let mut roi_orig = vec![0.0f32; rw * rh];
-                    for y in 0..rh {
-                        for x in 0..rw {
-                            roi_orig[y * rw + x] =
-                                linear_16bit[((by1 + y) * full_w + (bx1 + x)) * 3 + ch] as f32;
+                // Estimate sensor grain on Green channel once (avoids 3x blur and prevents chroma noise)
+                let grain_std = if params.preserve_grain && !ring_coords.is_empty() {
+                    let blurred = gaussian_blur_f32(&roi_orig_3ch[1], rw, rh, 1.2);
+                    let mut ring_hf: Vec<f32> = ring_coords
+                        .iter()
+                        .map(|&(x, y)| (roi_orig_3ch[1][y * rw + x] - blurred[y * rw + x]).abs())
+                        .collect();
+                    (median_f32(&mut ring_hf) as f32 * 1.4826).min(450.0)
+                } else {
+                    0.0
+                };
+
+                // Luma-correlated grain noise field
+                let mut luma_noise = vec![0.0f32; rw * rh];
+                if grain_std > 1.0 {
+                    for i in 0..(rw * rh) {
+                        if roi_alpha[i] > 0.0 {
+                            luma_noise[i] = rng.next_gaussian() * (grain_std * 0.85);
                         }
                     }
+                }
 
-                    // Estimate high-frequency grain MAD in ring
-                    let grain_std = if params.preserve_grain && !ring_coords.is_empty() {
-                        let blurred = gaussian_blur_f32(&roi_orig, rw, rh, 1.2);
-                        let mut ring_hf: Vec<f32> = ring_coords
-                            .iter()
-                            .map(|&(x, y)| (roi_orig[y * rw + x] - blurred[y * rw + x]).abs())
-                            .collect();
-                        (median_f32(&mut ring_hf) as f32 * 1.4826).min(450.0)
-                    } else {
-                        0.0
-                    };
-
+                for ch in 0..3 {
                     let roi_healed = if let Some(coeffs) = coeffs_3ch {
                         let c = coeffs[ch];
                         let mut detrended = vec![0.0f32; rw * rh];
@@ -680,7 +708,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                                 let nx = (x as f32 - half_rw) / half_rw;
                                 let p = (c[0] as f32) * nx + (c[1] as f32) * ny + (c[2] as f32);
                                 plane_2d[y * rw + x] = p;
-                                detrended[y * rw + x] = roi_orig[y * rw + x] - p;
+                                detrended[y * rw + x] = roi_orig_3ch[ch][y * rw + x] - p;
                             }
                         }
                         let filled =
@@ -691,22 +719,33 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                             .map(|(f, p)| p + f)
                             .collect::<Vec<f32>>()
                     } else {
-                        telea_harmonic_fill_roi(&roi_orig, &roi_expanded, rw, rh, harm_sigma)
+                        telea_harmonic_fill_roi(&roi_orig_3ch[ch], &roi_expanded, rw, rh, harm_sigma)
                     };
+
+                    let ch_scale = if let Some(coeffs) = coeffs_3ch {
+                        if ch == 0 { (coeffs[0][2] / coeffs[1][2].max(1.0)).clamp(0.2, 5.0) as f32 }
+                        else if ch == 2 { (coeffs[2][2] / coeffs[1][2].max(1.0)).clamp(0.2, 5.0) as f32 }
+                        else { 1.0f32 }
+                    } else {
+                        1.0f32
+                    };
+
+                    let guard_lo = (ring_min[ch] - 1500.0).max(0.0);
+                    let guard_hi = (ring_max[ch] + 1500.0).min(65535.0);
 
                     for y in 0..rh {
                         for x in 0..rw {
                             let r_idx = y * rw + x;
                             let alpha = roi_alpha[r_idx];
-                            let p_idx = (y * rw + x) * 3 + ch;
+                            let p_idx = r_idx * 3 + ch;
                             if alpha <= 0.0 {
-                                healed_patch[p_idx] = roi_orig[r_idx] as u16;
+                                healed_patch[p_idx] = roi_orig_3ch[ch][r_idx] as u16;
                             } else {
-                                let mut h_val = roi_healed[r_idx];
-                                if grain_std > 1.0 {
-                                    h_val += rng.next_gaussian() * (grain_std * 0.85);
+                                let mut h_val = roi_healed[r_idx] + luma_noise[r_idx] * ch_scale;
+                                if ring_min[ch] <= ring_max[ch] {
+                                    h_val = h_val.clamp(guard_lo, guard_hi);
                                 }
-                                let base_val = roi_orig[r_idx];
+                                let base_val = roi_orig_3ch[ch][r_idx];
                                 let blended = base_val * (1.0 - alpha) + h_val * alpha;
                                 healed_patch[p_idx] = blended.round().clamp(0.0, 65535.0) as u16;
                             }
@@ -722,6 +761,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                     rw,
                     rh,
                     healed_patch,
+                    roi_alpha,
                     core_cnt,
                 })
             })
@@ -731,38 +771,47 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
             inpainted_pixels += patch.core_cnt;
             roi_count += 1;
 
+            // Strict alpha-masked write-back prevents overlapping patches from overwriting earlier healed pixels
             for y in 0..patch.rh {
-                let src_offset = y * patch.rw * 3;
-                let dst_offset = ((patch.by1 + y) * full_w + patch.bx1) * 3;
-                let len = patch.rw * 3;
-                healed_16bit[dst_offset..dst_offset + len]
-                    .copy_from_slice(&patch.healed_patch[src_offset..src_offset + len]);
+                let src_row = y * patch.rw;
+                let dst_row = (patch.by1 + y) * full_w + patch.bx1;
+                for x in 0..patch.rw {
+                    let r_idx = src_row + x;
+                    if patch.roi_alpha[r_idx] > 0.0 {
+                        let s_base = r_idx * 3;
+                        let d_base = (dst_row + x) * 3;
+                        healed_16bit[d_base] = patch.healed_patch[s_base];
+                        healed_16bit[d_base + 1] = patch.healed_patch[s_base + 1];
+                        healed_16bit[d_base + 2] = patch.healed_patch[s_base + 2];
+                    }
+                }
             }
 
-            // Update working preview checkpoint on this ROI
+            // Update working preview only on healed pixels
             let wx1 = ((patch.bx1 as f64 * work_scale).floor() as usize).min(work_w);
             let wy1 = ((patch.by1 as f64 * work_scale).floor() as usize).min(work_h);
             let wx2 = ((patch.bx2 as f64 * work_scale).ceil() as usize).min(work_w);
             let wy2 = ((patch.by2 as f64 * work_scale).ceil() as usize).min(work_h);
             if wx2 > wx1 && wy2 > wy1 {
-                let ww_p = wx2 - wx1;
-                let wh_p = wy2 - wy1;
-                let patch_work = if (patch.rw, patch.rh) != (ww_p, wh_p) {
-                    downsample_patch_rgb16(&patch.healed_patch, patch.rw, patch.rh, ww_p, wh_p)
-                } else {
-                    patch.healed_patch
-                };
-                for y in 0..wh_p {
-                    for x in 0..ww_p {
-                        let s_base = (y * ww_p + x) * 3;
-                        let d_base = ((wy1 + y) * work_w + (wx1 + x)) * 3;
-                        for c in 0..3 {
-                            let v16 = patch_work[s_base + c];
-                            healed_work_u8[d_base + c] = if let Some(lut) = &lut_u8 {
-                                lut[v16 as usize]
-                            } else {
-                                (v16 as f32 / 257.0).round().clamp(0.0, 255.0) as u8
-                            };
+                for wy in wy1..wy2 {
+                    let fy = ((wy as f64 + 0.5) / work_scale - 0.5).round().clamp(0.0, (full_h - 1) as f64) as usize;
+                    for wx in wx1..wx2 {
+                        let fx = ((wx as f64 + 0.5) / work_scale - 0.5).round().clamp(0.0, (full_w - 1) as f64) as usize;
+                        if fx >= patch.bx1 && fx < patch.bx2 && fy >= patch.by1 && fy < patch.by2 {
+                            let lx = fx - patch.bx1;
+                            let ly = fy - patch.by1;
+                            if patch.roi_alpha[ly * patch.rw + lx] > 0.0 {
+                                let d_base = (wy * work_w + wx) * 3;
+                                let s_base = (fy * full_w + fx) * 3;
+                                for c in 0..3 {
+                                    let v16 = healed_16bit[s_base + c];
+                                    healed_work_u8[d_base + c] = if let Some(lut) = &lut_u8 {
+                                        lut[v16 as usize]
+                                    } else {
+                                        (v16 as f32 / 257.0).round().clamp(0.0, 255.0) as u8
+                                    };
+                                }
+                            }
                         }
                     }
                 }

@@ -121,9 +121,9 @@ fn convert_orientation(o: Orientation) -> Orientation {
     o
 }
 
-fn orient_rgb_u16(src: &[u16], w: usize, h: usize, orient: Orientation) -> (Vec<u16>, usize, usize) {
+fn orient_rgb_u16(src: Vec<u16>, w: usize, h: usize, orient: Orientation) -> (Vec<u16>, usize, usize) {
     if orient == Orientation::Normal {
-        return (src.to_vec(), w, h);
+        return (src, w, h);
     }
     let (ow, oh) = orient.oriented_size(w, h);
     let mut dst = vec![0u16; ow * oh * 3];
@@ -213,6 +213,9 @@ fn develop_raw_to_linear16_srgb(
         cam_to_rec2020.mul(&Mat3::diag(wb[0] as f64, wb[1] as f64, wb[2] as f64));
     let cam_to_srgb = rec2020_to_srgb.mul(&cam_to_rec2020_wb);
     let m = cam_to_srgb.0;
+    let (m00, m01, m02) = (m[0][0] as f32, m[0][1] as f32, m[0][2] as f32);
+    let (m10, m11, m12) = (m[1][0] as f32, m[1][1] as f32, m[1][2] as f32);
+    let (m20, m21, m22) = (m[2][0] as f32, m[2][1] as f32, m[2][2] as f32);
 
     let uw = cam_rgb.width;
     let uh = cam_rgb.height;
@@ -221,19 +224,19 @@ fn develop_raw_to_linear16_srgb(
         .par_chunks_mut(3)
         .zip(cam_rgb.data.par_iter())
         .for_each(|(out, px)| {
-            let r = px[0] as f64;
-            let g = px[1] as f64;
-            let b = px[2] as f64;
-            let sr = m[0][0] * r + m[0][1] * g + m[0][2] * b;
-            let sg = m[1][0] * r + m[1][1] * g + m[1][2] * b;
-            let sb = m[2][0] * r + m[2][1] * g + m[2][2] * b;
-            out[0] = (sr.clamp(0.0, 1.0) * 65535.0).round() as u16;
-            out[1] = (sg.clamp(0.0, 1.0) * 65535.0).round() as u16;
-            out[2] = (sb.clamp(0.0, 1.0) * 65535.0).round() as u16;
+            let r = px[0];
+            let g = px[1];
+            let b = px[2];
+            let sr = (m00 * r + m01 * g + m02 * b).clamp(0.0, 1.0) * 65535.0;
+            let sg = (m10 * r + m11 * g + m12 * b).clamp(0.0, 1.0) * 65535.0;
+            let sb = (m20 * r + m21 * g + m22 * b).clamp(0.0, 1.0) * 65535.0;
+            out[0] = sr.round() as u16;
+            out[1] = sg.round() as u16;
+            out[2] = sb.round() as u16;
         });
 
     let orient = convert_orientation(raw.orientation);
-    let (linear_16bit, full_w, full_h) = orient_rgb_u16(&unoriented_16, uw, uh, orient);
+    let (linear_16bit, full_w, full_h) = orient_rgb_u16(unoriented_16, uw, uh, orient);
 
     // Calibrate exposure_scale against the camera's embedded JPEG preview if present (`raw_pipeline.py:298-315`)
     let mut exposure_scale_override = None;
@@ -374,7 +377,7 @@ pub fn ingest_bytes(
     let mut bayer_pattern = "RGBG".to_string();
     let mut is_input_16bit = false;
     let mut raw_image_opt: Option<RawImage> = None;
-    let mut exif_meta = extract_exif_from_bytes(bytes);
+    let exif_meta;
 
     let (linear_16bit, full_w, full_h, decode_kind, exposure_scale_override, geometry) = if is_raw {
         match decode_raw_isolated(bytes) {
@@ -423,12 +426,14 @@ pub fn ingest_bytes(
                 (lin16, fw, fh, kind, exp_ovr, geom)
             }
             Err(raw_err) => {
+                exif_meta = extract_exif_from_bytes(bytes);
                 let (lin16, fw, fh, kind, exp_ovr) = decode_raw_tiff_fallback(bytes, &raw_err)?;
                 let geom = Geometry::identity(fw, fh);
                 (lin16, fw, fh, kind, exp_ovr, geom)
             }
         }
     } else {
+        exif_meta = extract_exif_from_bytes(bytes);
         let dyn_img = catch_unwind(AssertUnwindSafe(|| image::load_from_memory(bytes)))
             .map_err(|_| ScError::DecoderPanic("이미지 디코딩 중 패닉이 격리되었습니다.".into()))?
             .map_err(|e| ScError::CorruptInput(format!("이미지를 디코딩할 수 없습니다: {e}")))?;

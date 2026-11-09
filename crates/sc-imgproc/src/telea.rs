@@ -145,6 +145,14 @@ fn grad_img(img: &[f32], flags: &[u8], w: usize, h: usize, x: usize, y: usize) -
     (gx, gy)
 }
 
+#[derive(Clone, Copy)]
+struct NeighborOffset {
+    dx: isize,
+    dy: isize,
+    dist: f32,
+    inv_dist2: f32,
+}
+
 /// Computes the inpaint value for pixel `p` from known neighbors within radius `inpaint_radius`.
 #[allow(clippy::too_many_arguments)]
 fn inpaint_point(
@@ -155,7 +163,7 @@ fn inpaint_point(
     h: usize,
     px: usize,
     py: usize,
-    radius: f32,
+    offsets: &[NeighborOffset],
 ) -> f32 {
     let p_idx = py * w + px;
     let tp = t[p_idx];
@@ -169,58 +177,51 @@ fn inpaint_point(
         (0.0, 0.0)
     };
 
-    let r_int = (radius.ceil() as isize).max(1);
-    let y0 = (py as isize - r_int).max(0) as usize;
-    let y1 = (py as isize + r_int + 1).min(h as isize) as usize;
-    let x0 = (px as isize - r_int).max(0) as usize;
-    let x1 = (px as isize + r_int + 1).min(w as isize) as usize;
-
-    let r2_max = radius * radius;
     let mut weight_sum = 0.0f32;
     let mut val_sum = 0.0f32;
 
-    for qy in y0..y1 {
-        for qx in x0..x1 {
-            let q_idx = qy * w + qx;
-            if flags[q_idx] != FLAG_KNOWN {
-                continue;
-            }
-
-            let rx = px as f32 - qx as f32;
-            let ry = py as f32 - qy as f32;
-            let dist2 = rx * rx + ry * ry;
-            if dist2 > r2_max || dist2 < 1e-6 {
-                continue;
-            }
-            let dist = dist2.sqrt();
-
-            // Directional weight: w_dir = |(p - q) . n| / |p - q|
-            let w_dir = if n_len > 1e-6 {
-                let dot = (rx * unx + ry * uny).abs();
-                (dot / dist).clamp(0.01, 1.0)
-            } else {
-                1.0
-            };
-
-            // Distance weight: w_dst = 1 / dist^2
-            let w_dst = 1.0 / dist2;
-
-            // Level set weight: w_lev = 1 / (1 + |T(p) - T(q)|)
-            let t_diff = (tp - t[q_idx]).abs();
-            let w_lev = 1.0 / (1.0 + t_diff);
-
-            // Image gradient at q: \nabla I(q)
-            let (grad_ix, grad_iy) = grad_img(img, flags, w, h, qx, qy);
-
-            // First-order Taylor prediction with slope clamping to satisfy the Maximum Principle
-            // and eliminate runaway chromatic starburst spikes
-            let grad_step = (grad_ix * rx + grad_iy * ry).clamp(-12.0, 12.0);
-            let val_pred = img[q_idx] + grad_step;
-
-            let w_total = w_dir * w_dst * w_lev;
-            val_sum += w_total * val_pred;
-            weight_sum += w_total;
+    for n in offsets {
+        let qx_i = px as isize + n.dx;
+        let qy_i = py as isize + n.dy;
+        if qx_i < 0 || qx_i >= w as isize || qy_i < 0 || qy_i >= h as isize {
+            continue;
         }
+        let qx = qx_i as usize;
+        let qy = qy_i as usize;
+        let q_idx = qy * w + qx;
+        if flags[q_idx] != FLAG_KNOWN {
+            continue;
+        }
+
+        let rx = -n.dx as f32;
+        let ry = -n.dy as f32;
+
+        // Directional weight: w_dir = |(p - q) . n| / |p - q|
+        let w_dir = if n_len > 1e-6 {
+            let dot = (rx * unx + ry * uny).abs();
+            (dot / n.dist).clamp(0.01, 1.0)
+        } else {
+            1.0
+        };
+
+        // Distance weight: w_dst = 1 / dist^2
+        let w_dst = n.inv_dist2;
+
+        // Level set weight: w_lev = 1 / (1 + |T(p) - T(q)|)
+        let t_diff = (tp - t[q_idx]).abs();
+        let w_lev = 1.0 / (1.0 + t_diff);
+
+        // Image gradient at q: \nabla I(q)
+        let (grad_ix, grad_iy) = grad_img(img, flags, w, h, qx, qy);
+
+        // First-order Taylor prediction with slope clamping to satisfy the Maximum Principle
+        // and eliminate runaway chromatic starburst spikes
+        let grad_step = (grad_ix * rx + grad_iy * ry).clamp(-12.0, 12.0);
+        let val_pred = img[q_idx] + grad_step;
+
+        let w_total = w_dir * w_dst * w_lev;
+        val_sum += w_total * val_pred;
+        weight_sum += w_total;
     }
 
     if weight_sum > 1e-8 {
@@ -291,6 +292,23 @@ pub fn inpaint_telea_f32(
     }
 
     let r_eff = inpaint_radius.max(1.5);
+    let r_int = (r_eff.ceil() as isize).max(1);
+    let r2_max = r_eff * r_eff;
+    let mut offsets: Vec<NeighborOffset> = Vec::with_capacity(((2 * r_int + 1) * (2 * r_int + 1)) as usize);
+    for dy in -r_int..=r_int {
+        for dx in -r_int..=r_int {
+            let dist2 = (dx * dx + dy * dy) as f32;
+            if dist2 <= r2_max && dist2 >= 1e-6 {
+                let dist = dist2.sqrt();
+                offsets.push(NeighborOffset {
+                    dx,
+                    dy,
+                    dist,
+                    inv_dist2: 1.0 / dist2,
+                });
+            }
+        }
+    }
 
     // 3. Fast Marching loop
     while let Some(HeapItem { dist, idx: p_idx }) = heap.pop() {
@@ -311,7 +329,7 @@ pub fn inpaint_telea_f32(
             h,
             px,
             py,
-            r_eff,
+            &offsets,
         );
         flags[p_idx] = FLAG_KNOWN;
 

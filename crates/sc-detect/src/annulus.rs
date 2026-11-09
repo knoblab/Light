@@ -246,6 +246,8 @@ pub fn eval_single_radius_annulus(
         return None;
     }
 
+    let b_scale = ((approx_bg - 60.0) / 100.0).clamp(0.40, 1.0);
+
     let core_val = if is_sharp_branch {
         percentile_f32(&mut core_pixels, 25.0)
     } else {
@@ -272,8 +274,8 @@ pub fn eval_single_radius_annulus(
     let p95_res = res_sorted[((n_ann as f64 * 0.95) as usize).min(n_ann - 1)] as f64;
     let ann_span = p95_res - p05_res;
 
-    let max_ann_all_std = (if is_sharp_branch { 2.25 } else { 2.10 }) / prot;
-    let max_ann_span = (if is_sharp_branch { 5.80 } else { 5.20 }) / prot;
+    let max_ann_all_std = (if is_sharp_branch { 1.85 } else { 1.48 }) * b_scale / prot;
+    let max_ann_span = (if is_sharp_branch { 5.20 } else { 4.30 }) * b_scale / prot;
     if ann_all_std > max_ann_all_std || ann_span > max_ann_span {
         return None;
     }
@@ -324,28 +326,31 @@ pub fn eval_single_radius_annulus(
         return None;
     }
 
-    // Step 3 (Bokeh only): inner gradient 90th percentile check
-    if !is_sharp_branch {
-        let r_inner = (r_det * 1.35) as f32;
-        let mut inner_grad = Vec::with_capacity(64);
-        for py in y0..y1 {
-            let gy = (GRID_HALF + (py as isize - iy)) as usize;
-            let grad_row = &grad_map[py * w..(py + 1) * w];
-            let grid_row_base = gy * GRID_DIM;
-            for (px, &g_val) in grad_row.iter().enumerate().take(x1).skip(x0) {
-                let gx = (GRID_HALF + (px as isize - ix)) as usize;
-                if grids.gdist[grid_row_base + gx] <= r_inner {
-                    inner_grad.push(g_val);
-                }
+    // Step 3: inner gradient 90th percentile check (both sharp and bokeh)
+    let r_inner = (r_det * if is_sharp_branch { 1.05 } else { 1.35 }) as f32;
+    let mut inner_grad = Vec::with_capacity(64);
+    for py in y0..y1 {
+        let gy = (GRID_HALF + (py as isize - iy)) as usize;
+        let grad_row = &grad_map[py * w..(py + 1) * w];
+        let grid_row_base = gy * GRID_DIM;
+        for (px, &g_val) in grad_row.iter().enumerate().take(x1).skip(x0) {
+            let gx = (GRID_HALF + (px as isize - ix)) as usize;
+            if grids.gdist[grid_row_base + gx] <= r_inner {
+                inner_grad.push(g_val);
             }
         }
-        if !inner_grad.is_empty() {
-            inner_grad.sort_by(|a, b| a.total_cmp(b));
-            let idx90 = ((inner_grad.len() as f64 * 0.90) as usize).min(inner_grad.len() - 1);
-            let inner_grad_p90 = inner_grad[idx90] as f64;
-            if inner_grad_p90 > (depth * 1.35).max(3.4) {
-                return None;
-            }
+    }
+    if !inner_grad.is_empty() {
+        inner_grad.sort_by(|a, b| a.total_cmp(b));
+        let idx90 = ((inner_grad.len() as f64 * 0.90) as usize).min(inner_grad.len() - 1);
+        let inner_grad_p90 = inner_grad[idx90] as f64;
+        let max_grad = if is_sharp_branch {
+            (depth * 1.55).max(3.2) * b_scale
+        } else {
+            (depth * 1.35).max(3.4)
+        };
+        if inner_grad_p90 > max_grad {
+            return None;
         }
     }
 
