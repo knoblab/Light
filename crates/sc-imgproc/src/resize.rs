@@ -74,6 +74,9 @@ pub fn resize_inter_area_f32(
     if dw > sw || dh > sh {
         return resize_bilinear_f32(src, sw, sh, dw, dh);
     }
+    if sw == 2 * dw && sh == 2 * dh {
+        return crate::gaussian::downsample_2x_f32(src, sw, sh).0;
+    }
 
     let x_taps = build_area_weights(sw, dw);
     let y_taps = build_area_weights(sh, dh);
@@ -156,15 +159,12 @@ pub fn resize_inter_area_u16_rgb(
     dst.par_chunks_mut(dw * 3)
         .enumerate()
         .for_each(|(dy, out_row)| {
-            let mut acc = vec![0.0f32; dw * 3];
-            for tap in &y_taps[dy] {
-                let in_row = &horiz[tap.index * dw * 3..(tap.index + 1) * dw * 3];
-                for (a, &v) in acc.iter_mut().zip(in_row.iter()) {
-                    *a += v * tap.weight;
+            for (dx3, out_px) in out_row.iter_mut().enumerate() {
+                let mut sum = 0.0f32;
+                for tap in &y_taps[dy] {
+                    sum += horiz[tap.index * dw * 3 + dx3] * tap.weight;
                 }
-            }
-            for (out_px, a) in out_row.iter_mut().zip(acc) {
-                *out_px = a.round().clamp(0.0, 65535.0) as u16;
+                *out_px = sum.round().clamp(0.0, 65535.0) as u16;
             }
         });
 

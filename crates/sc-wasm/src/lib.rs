@@ -15,7 +15,7 @@ use sc_core::{
 };
 use sc_decode::{ingest_bytes, raw_pixels_u16};
 use sc_detect::cluster_multi_frame_spots;
-use sc_detect::detect_from_gray;
+use sc_detect::{detect_from_gray_with_workspace, DetectionWorkspace};
 use sc_dng::{
     generate_xmp_sidecar_xml, write_cfa_dng_bytes, write_rendered_jpeg_bytes,
     write_rendered_png16_bytes, write_rendered_png8_bytes, write_rendered_tiff16_bytes,
@@ -47,6 +47,7 @@ pub struct WasmSession {
     pub multi_confirmed: HashSet<usize>,
     pub cancel_token: CancelToken,
     pub cfa_roi_cache: sc_heal::roi_cache::RoiCache,
+    pub detect_workspace: Option<DetectionWorkspace>,
 }
 
 static SESSIONS: Mutex<Option<HashMap<String, WasmSession>>> = Mutex::new(None);
@@ -124,7 +125,9 @@ pub fn wasm_ingest_and_detect_core(
     let fh = meta.full_height;
     let scale = meta.work_scale;
 
-    let det_output = detect_from_gray(
+    let mut ws = DetectionWorkspace::new();
+    let det_output = detect_from_gray_with_workspace(
+        &mut ws,
         &ingested.det_gray,
         ww,
         wh,
@@ -180,6 +183,7 @@ pub fn wasm_ingest_and_detect_core(
         multi_confirmed: HashSet::new(),
         cancel_token: CancelToken::new(),
         cfa_roi_cache: sc_heal::roi_cache::RoiCache::new(),
+        detect_workspace: Some(ws),
     };
 
     with_sessions(|s| {
@@ -209,7 +213,9 @@ pub fn wasm_detect_core(session_id: &str, params: DetectionParams) -> Result<Det
         let fh = session.meta.full_height;
         let scale = session.meta.work_scale;
 
-        let det_output = detect_from_gray(
+        let mut ws = session.detect_workspace.take().unwrap_or_default();
+        let det_output = detect_from_gray_with_workspace(
+            &mut ws,
             &session.det_gray,
             ww,
             wh,
@@ -220,6 +226,7 @@ pub fn wasm_detect_core(session_id: &str, params: DetectionParams) -> Result<Det
             scale,
             &params,
         );
+        session.detect_workspace = Some(ws);
         let det = det_output.result;
         session.spots = det.spots.clone();
 

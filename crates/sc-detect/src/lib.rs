@@ -17,6 +17,7 @@ pub mod multi;
 pub mod noise_model;
 pub mod profile;
 pub mod tiles;
+pub mod workspace;
 
 pub use annulus::{AnnulusEval, AnnulusGrids, eval_single_radius_annulus, verify_annulus_plane_snr};
 pub use cfa_luma::{extract_cfa_half_streams, BayerLayout, CfaHalfStreams};
@@ -27,14 +28,16 @@ pub use tiles::{
     deduplicate_tile_candidates, extract_tile_buffer, generate_tile_specs, TileSpec,
     DEFAULT_HALO, DEFAULT_TILE_SIZE,
 };
+pub use workspace::DetectionWorkspace;
 
 use rayon::prelude::*;
 use sc_color::{median_f32, percentile_f32};
 use sc_core::{DetectedDustSpot, DetectionParams, DetectionResult};
 use sc_imgproc::{
     dilate_f32, draw_aa_circle_rgb, draw_filled_circle_u8, ellipse_kernel,
-    extract_sharp_candidates, gaussian_blur_f32, gradient_magnitude_f32,
-    pad_invalid_border_nearest, resize_bilinear_f32, resize_inter_area_f32, resize_nearest_bool,
+    extract_sharp_candidates, gaussian_blur_f32, gaussian_blur_f32_into,
+    gradient_magnitude_f32_into, pad_invalid_border_nearest, resize_bilinear_f32,
+    resize_inter_area_f32, resize_nearest_bool, upsample_bilinear_f32_into,
 };
 use std::f64::consts::PI;
 
@@ -78,9 +81,10 @@ pub struct DetectionOutput {
 }
 
 /// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`)
-/// with cooperative cancellation support.
+/// with cooperative cancellation support, using a pre-allocated `DetectionWorkspace` to eliminate allocations.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_from_gray_cancellable(
+pub fn detect_from_gray_cancellable_with_workspace(
+    ws: &mut DetectionWorkspace,
     gray_det: &[f32],
     det_w: usize,
     det_h: usize,
@@ -93,6 +97,10 @@ pub fn detect_from_gray_cancellable(
     cancel: Option<&sc_core::CancelToken>,
 ) -> sc_core::Result<DetectionOutput> {
     let n_det = det_w.saturating_mul(det_h);
+    let pyr_w = (det_w / 2).max(1);
+    let pyr_h = (det_h / 2).max(1);
+    let n_pyr = pyr_w.saturating_mul(pyr_h);
+
     if det_w == 0 || det_h == 0 || gray_det.len() < n_det {
         return Ok(DetectionOutput {
             result: DetectionResult {
@@ -115,6 +123,8 @@ pub fn detect_from_gray_cancellable(
         });
     }
 
+    ws.prepare_for_dims(det_w, det_h, pyr_w, pyr_h, work_w, work_h);
+
     if let Some(c) = cancel {
         c.check()?;
     }
@@ -132,56 +142,64 @@ pub fn detect_from_gray_cancellable(
     let max_r_det = (max_radius_full * det_scale).max(min_r_det + 4.0);
 
     // 1. Pad black letterbox/pillarbox bars (< 8.0) with nearest valid photo pixels
-    let valid_photo_mask: Vec<bool> = gray_det[..n_det].iter().map(|&v| v >= 8.0).collect();
-    let gray_filt = pad_invalid_border_nearest(&gray_det[..n_det], det_w, det_h, 8.0);
+    for i in 0..n_det {
+        ws.valid_photo_mask[i] = gray_det[i] >= 8.0;
+    }
+    let gray_filt_pad = pad_invalid_border_nearest(&gray_det[..n_det], det_w, det_h, 8.0);
+    ws.gray_filt.copy_from_slice(&gray_filt_pad);
 
     if let Some(c) = cancel {
         c.check()?;
     }
 
     // 2. Regional Background Macro-Std Map (sigma=22) & High-Frequency Foliage Texture Map
-    let s1 = gaussian_blur_f32(&gray_filt, det_w, det_h, 0.9);
-    let g8 = gaussian_blur_f32(&s1, det_w, det_h, 8.5);
-    let denoise_det = gaussian_blur_f32(&gray_filt, det_w, det_h, 1.8);
+    gaussian_blur_f32_into(&ws.gray_filt, &mut ws.tmp_det, &mut ws.s1, det_w, det_h, 0.9);
+    gaussian_blur_f32_into(&ws.s1, &mut ws.tmp_det, &mut ws.g8, det_w, det_h, 8.5);
+    gaussian_blur_f32_into(&ws.gray_filt, &mut ws.tmp_det, &mut ws.denoise_det, det_w, det_h, 1.8);
 
-    let s1_masked: Vec<f32> = s1
-        .iter()
-        .zip(valid_photo_mask.iter())
-        .map(|(&v, &ok)| if ok { v } else { 0.0 })
-        .collect();
-    let denoise_masked: Vec<f32> = denoise_det
-        .iter()
-        .zip(valid_photo_mask.iter())
-        .map(|(&v, &ok)| if ok { v } else { 0.0 })
-        .collect();
+    for i in 0..n_det {
+        let ok = ws.valid_photo_mask[i];
+        ws.s1_masked[i] = if ok { ws.s1[i] } else { 0.0 };
+        ws.denoise_masked[i] = if ok { ws.denoise_det[i] } else { 0.0 };
+    }
 
-    let bg_mean_22 = gaussian_blur_f32(&denoise_det, det_w, det_h, 22.0);
-    let bg_diff_sq: Vec<f32> = denoise_det
-        .par_iter()
-        .zip(bg_mean_22.par_iter())
-        .map(|(&d, &m)| {
+    gaussian_blur_f32_into(&ws.denoise_det, &mut ws.tmp_det, &mut ws.bg_mean_22, det_w, det_h, 22.0);
+    ws.bg_diff_sq
+        .par_iter_mut()
+        .zip(ws.denoise_det.par_iter().zip(ws.bg_mean_22.par_iter()))
+        .for_each(|(sq, (&d, &m))| {
             let c = (d - m).max(-3.2);
-            c * c
-        })
-        .collect();
-    let bg_sq_22 = gaussian_blur_f32(&bg_diff_sq, det_w, det_h, 22.0);
-    let bg_std_map: Vec<f32> = bg_sq_22.into_par_iter().map(|v| v.max(0.0).sqrt()).collect();
+            *sq = c * c;
+        });
+    gaussian_blur_f32_into(&ws.bg_diff_sq, &mut ws.tmp_det, &mut ws.bg_sq_22, det_w, det_h, 22.0);
+    ws.bg_std_map
+        .par_iter_mut()
+        .zip(ws.bg_sq_22.par_iter())
+        .for_each(|(std, &sq)| {
+            *std = sq.max(0.0).sqrt();
+        });
 
-    let hf_diff_clamped: Vec<f32> = s1
-        .par_iter()
-        .zip(g8.par_iter())
-        .map(|(&s, &g)| {
+    ws.hf_diff_clamped
+        .par_iter_mut()
+        .zip(ws.s1.par_iter().zip(ws.g8.par_iter()))
+        .for_each(|(hf, (&s, &g))| {
             let diff = s - g;
-            diff.abs().min((diff + 2.8).max(2.8))
-        })
-        .collect();
-    let hf_texture = gaussian_blur_f32(&hf_diff_clamped, det_w, det_h, 18.0);
-    let grad_mag = gradient_magnitude_f32(&denoise_det, det_w, det_h, 1.5);
+            *hf = diff.abs().min((diff + 2.8).max(2.8));
+        });
+    gaussian_blur_f32_into(&ws.hf_diff_clamped, &mut ws.tmp_det, &mut ws.hf_texture, det_w, det_h, 18.0);
+    gradient_magnitude_f32_into(
+        &ws.denoise_det,
+        &mut ws.dx_buf,
+        &mut ws.dy_buf,
+        &mut ws.grad_mag,
+        det_w,
+        det_h,
+        1.5,
+    );
 
     let prot = (0.55 + (cloud_protection / 100.0) * 0.60) as f32;
-    let grids = AnnulusGrids::new();
     let mut raw_candidates: Vec<RawCandidate> = Vec::new();
-    let mut combined_vis_det = vec![0.0f32; n_det];
+    ws.combined_vis_det.fill(0.0);
 
     let run_sharp = matches!(
         method.as_str(),
@@ -198,25 +216,31 @@ pub fn detect_from_gray_cancellable(
         let max_hf = 1.55 / prot;
         let diff_thresh = (4.10 - (sensitivity / 100.0) * 2.55).max(1.75) as f32;
 
-        let mut bm_sharp = vec![0u8; n_det];
+        ws.bm_sharp.fill(0);
         for i in 0..n_det {
-            if valid_photo_mask[i]
-                && g8[i] >= 86.0
-                && bg_std_map[i] <= max_std
-                && hf_texture[i] <= max_hf
+            if ws.valid_photo_mask[i]
+                && ws.g8[i] >= 86.0
+                && ws.bg_std_map[i] <= max_std
+                && ws.hf_texture[i] <= max_hf
             {
-                let sd = (g8[i] - s1[i]).max(0.0);
+                let sd = (ws.g8[i] - ws.s1[i]).max(0.0);
                 let vis = sd * 1.4;
-                if vis > combined_vis_det[i] {
-                    combined_vis_det[i] = vis;
+                if vis > ws.combined_vis_det[i] {
+                    ws.combined_vis_det[i] = vis;
                 }
                 if sd >= diff_thresh {
-                    bm_sharp[i] = 255;
+                    ws.bm_sharp[i] = 255;
                 }
             }
         }
 
-        let comp_cands = extract_sharp_candidates(&bm_sharp, det_w, det_h);
+        let comp_cands = extract_sharp_candidates(&ws.bm_sharp, det_w, det_h);
+        let grids_ref = &ws.grids;
+        let s1_masked_ref = &ws.s1_masked;
+        let grad_mag_ref = &ws.grad_mag;
+        let bg_std_map_ref = &ws.bg_std_map;
+        let hf_texture_ref = &ws.hf_texture;
+
         let verified_sharp: Vec<RawCandidate> = comp_cands
             .into_par_iter()
             .filter_map(|c| {
@@ -225,11 +249,11 @@ pub fn detect_from_gray_cancellable(
                     return None;
                 }
                 let eval = verify_annulus_plane_snr(
-                    &grids,
-                    &s1_masked,
-                    &grad_mag,
-                    &bg_std_map,
-                    &hf_texture,
+                    grids_ref,
+                    s1_masked_ref,
+                    grad_mag_ref,
+                    bg_std_map_ref,
+                    hf_texture_ref,
                     det_w,
                     det_h,
                     c.cx,
@@ -267,26 +291,24 @@ pub fn detect_from_gray_cancellable(
 
     // ─── BRANCH B: Defocused / Bokeh Circular Dust Detector (12-Scale DoG Pyramid) ───
     if run_bokeh {
-        let pyr_w = (det_w / 2).max(1);
-        let pyr_h = (det_h / 2).max(1);
-        let n_pyr = pyr_w * pyr_h;
         let pyr_scale_x = pyr_w as f64 / det_w as f64;
         let pyr_scale_y = pyr_h as f64 / det_h as f64;
         let pyr_scale = 0.5 * (pyr_scale_x + pyr_scale_y);
 
-        let denoise_pyr = resize_inter_area_f32(&denoise_det, det_w, det_h, pyr_w, pyr_h);
-        let quiet_sky_mask: Vec<bool> = (0..n_det)
-            .map(|i| {
-                valid_photo_mask[i]
-                    && bg_mean_22[i] >= 86.0
-                    && bg_std_map[i] <= 1.65
-                    && hf_texture[i] <= 1.1
-            })
-            .collect();
-        let quiet_sky_pyr =
-            resize_nearest_bool(&quiet_sky_mask, det_w, det_h, pyr_w, pyr_h);
+        let denoise_pyr = resize_inter_area_f32(&ws.denoise_det, det_w, det_h, pyr_w, pyr_h);
+        ws.denoise_pyr.copy_from_slice(&denoise_pyr);
 
-        let sky_indices: Vec<usize> = quiet_sky_pyr
+        for i in 0..n_det {
+            ws.quiet_sky_mask[i] = ws.valid_photo_mask[i]
+                && ws.bg_mean_22[i] >= 86.0
+                && ws.bg_std_map[i] <= 1.65
+                && ws.hf_texture[i] <= 1.1;
+        }
+        let qsp = resize_nearest_bool(&ws.quiet_sky_mask, det_w, det_h, pyr_w, pyr_h);
+        ws.quiet_sky_pyr.copy_from_slice(&qsp);
+
+        let sky_indices: Vec<usize> = ws
+            .quiet_sky_pyr
             .iter()
             .enumerate()
             .filter_map(|(idx, &ok)| if ok { Some(idx) } else { None })
@@ -309,25 +331,30 @@ pub fn detect_from_gray_cancellable(
             })
             .collect();
 
+        let denoise_pyr_ref = &ws.denoise_pyr;
+        let sky_sub_indices_ref = &sky_sub_indices;
+
         let scale_bands: Vec<(Vec<f32>, Vec<f32>)> = bokeh_radii
             .par_iter()
             .map(|&r_b| {
                 let r_p = r_b * pyr_scale;
-                let g_in = gaussian_blur_f32(&denoise_pyr, pyr_w, pyr_h, r_p * 0.45);
-                let g_out = gaussian_blur_f32(&denoise_pyr, pyr_w, pyr_h, r_p * 1.24);
-                let raw_band: Vec<f32> = g_out
-                    .iter()
-                    .zip(g_in.iter())
-                    .map(|(&go, &gi)| ((go - gi) / go.max(25.0)) * 255.0)
-                    .collect();
+                let mut g_in = gaussian_blur_f32(denoise_pyr_ref, pyr_w, pyr_h, r_p * 0.45);
+                let mut g_out = gaussian_blur_f32(denoise_pyr_ref, pyr_w, pyr_h, r_p * 1.24);
+
+                // Compute raw_band in-place in g_out
+                for i in 0..n_pyr {
+                    let go = g_out[i];
+                    let gi = g_in[i];
+                    g_out[i] = ((go - gi) / go.max(25.0)) * 255.0;
+                }
 
                 let mut sample_vals = if has_quiet_sky {
-                    sky_sub_indices.iter().map(|&idx| raw_band[idx]).collect::<Vec<f32>>()
+                    sky_sub_indices_ref.iter().map(|&idx| g_out[idx]).collect::<Vec<f32>>()
                 } else {
                     let mut v = Vec::with_capacity((pyr_h.div_ceil(2)) * (pyr_w.div_ceil(2)));
                     for y in (0..pyr_h).step_by(2) {
                         for x in (0..pyr_w).step_by(2) {
-                            v.push(raw_band[y * pyr_w + x]);
+                            v.push(g_out[y * pyr_w + x]);
                         }
                     }
                     v
@@ -340,45 +367,57 @@ pub fn detect_from_gray_cancellable(
                 let eff_mad = mad_sky.max(0.16);
                 let scale_weight = (r_b / bokeh_min_r).powf(-0.05) as f32;
 
-                let mut z_b = Vec::with_capacity(n_pyr);
-                let mut c_b = Vec::with_capacity(n_pyr);
-                for &rv in &raw_band {
-                    let diff = (rv - med).max(0.0);
-                    z_b.push(diff / eff_mad);
-                    c_b.push(diff * scale_weight);
+                // In-place transform: g_in becomes z_b, g_out becomes c_b
+                for i in 0..n_pyr {
+                    let diff = (g_out[i] - med).max(0.0);
+                    g_in[i] = diff / eff_mad;
+                    g_out[i] = diff * scale_weight;
                 }
-                (z_b, c_b)
+                (g_in, g_out)
             })
             .collect();
 
-        let mut max_z_pyr = vec![0.0f32; n_pyr];
-        let mut best_c_pyr = vec![f32::NEG_INFINITY; n_pyr];
-        let mut bokeh_best_idx_pyr = vec![0usize; n_pyr];
+        ws.max_z_pyr.fill(0.0);
+        ws.best_c_pyr.fill(f32::NEG_INFINITY);
+        ws.bokeh_best_idx_pyr.fill(0);
 
         for (s_idx, (z_b, c_b)) in scale_bands.iter().enumerate() {
             for i in 0..n_pyr {
-                if z_b[i] > max_z_pyr[i] {
-                    max_z_pyr[i] = z_b[i];
+                if z_b[i] > ws.max_z_pyr[i] {
+                    ws.max_z_pyr[i] = z_b[i];
                 }
-                if c_b[i] > best_c_pyr[i] {
-                    best_c_pyr[i] = c_b[i];
-                    bokeh_best_idx_pyr[i] = s_idx;
+                if c_b[i] > ws.best_c_pyr[i] {
+                    ws.best_c_pyr[i] = c_b[i];
+                    ws.bokeh_best_idx_pyr[i] = s_idx;
                 }
             }
         }
 
-        let bokeh_max_z_pyr = gaussian_blur_f32(&max_z_pyr, pyr_w, pyr_h, 0.8);
-        let bokeh_max_z =
-            resize_bilinear_f32(&bokeh_max_z_pyr, pyr_w, pyr_h, det_w, det_h);
+        gaussian_blur_f32_into(
+            &ws.max_z_pyr,
+            &mut ws.pyr_scratch_a,
+            &mut ws.bokeh_max_z_pyr,
+            pyr_w,
+            pyr_h,
+            0.8,
+        );
+        upsample_bilinear_f32_into(
+            &ws.bokeh_max_z_pyr,
+            pyr_w,
+            pyr_h,
+            &mut ws.bokeh_max_z,
+            det_w,
+            det_h,
+        );
 
         let max_vis_std = 3.0 / prot;
         for i in 0..n_det {
-            if valid_photo_mask[i]
-                && bg_mean_22[i] >= 86.0
-                && bg_std_map[i] <= max_vis_std
-                && bokeh_max_z[i] > combined_vis_det[i]
+            if ws.valid_photo_mask[i]
+                && ws.bg_mean_22[i] >= 86.0
+                && ws.bg_std_map[i] <= max_vis_std
+                && ws.bokeh_max_z[i] > ws.combined_vis_det[i]
             {
-                combined_vis_det[i] = bokeh_max_z[i];
+                ws.combined_vis_det[i] = ws.bokeh_max_z[i];
             }
         }
 
@@ -386,29 +425,38 @@ pub fn detect_from_gray_cancellable(
         let nms_k_pyr = (((bokeh_min_r * pyr_scale * 1.85).round() as usize) | 1).max(7);
         let k_ell = ellipse_kernel(nms_k_pyr, nms_k_pyr);
         let local_max_pyr =
-            dilate_f32(&bokeh_max_z_pyr, pyr_w, pyr_h, nms_k_pyr, nms_k_pyr, &k_ell);
+            dilate_f32(&ws.bokeh_max_z_pyr, pyr_w, pyr_h, nms_k_pyr, nms_k_pyr, &k_ell);
 
         let mut peaks = Vec::new();
         for py_p in 0..pyr_h {
             for px_p in 0..pyr_w {
                 let idx_p = py_p * pyr_w + px_p;
-                let z = bokeh_max_z_pyr[idx_p];
+                let z = ws.bokeh_max_z_pyr[idx_p];
                 if z >= z_thresh && z >= local_max_pyr[idx_p] - 1e-4 {
-                    peaks.push((px_p, py_p, bokeh_best_idx_pyr[idx_p]));
+                    peaks.push((px_p, py_p, ws.bokeh_best_idx_pyr[idx_p]));
                 }
             }
         }
 
         let max_bokeh_std = 2.75 / prot;
+        let grids_ref = &ws.grids;
+        let denoise_masked_ref = &ws.denoise_masked;
+        let grad_mag_ref = &ws.grad_mag;
+        let bg_std_map_ref = &ws.bg_std_map;
+        let hf_texture_ref = &ws.hf_texture;
+        let valid_photo_mask_ref = &ws.valid_photo_mask;
+        let bg_mean_22_ref = &ws.bg_mean_22;
+        let denoise_det_ref = &ws.denoise_det;
+
         let verified_bokeh: Vec<RawCandidate> = peaks
             .into_par_iter()
             .filter_map(|(px_p, py_p, best_idx)| {
                 let px = ((px_p as f64 / pyr_scale_x).round() as usize).min(det_w - 1);
                 let py = ((py_p as f64 / pyr_scale_y).round() as usize).min(det_h - 1);
                 let det_idx = py * det_w + px;
-                if !valid_photo_mask[det_idx]
-                    || bg_mean_22[det_idx] < 86.0
-                    || bg_std_map[det_idx] > max_bokeh_std
+                if !valid_photo_mask_ref[det_idx]
+                    || bg_mean_22_ref[det_idx] < 86.0
+                    || bg_std_map_ref[det_idx] > max_bokeh_std
                 {
                     return None;
                 }
@@ -423,7 +471,7 @@ pub fn detect_from_gray_cancellable(
                 let mut py_ref = py;
                 for yy in y_lo..y_hi {
                     for xx in x_lo..x_hi {
-                        let v = denoise_det[yy * det_w + xx];
+                        let v = denoise_det_ref[yy * det_w + xx];
                         if v < min_v {
                             min_v = v;
                             px_ref = xx;
@@ -434,11 +482,11 @@ pub fn detect_from_gray_cancellable(
 
                 let best_r_d = bokeh_radii[best_idx];
                 let eval = verify_annulus_plane_snr(
-                    &grids,
-                    &denoise_masked,
-                    &grad_mag,
-                    &bg_std_map,
-                    &hf_texture,
+                    grids_ref,
+                    denoise_masked_ref,
+                    grad_mag_ref,
+                    bg_std_map_ref,
+                    hf_texture_ref,
                     det_w,
                     det_h,
                     px_ref as f64,
@@ -519,11 +567,11 @@ pub fn detect_from_gray_cancellable(
     }
 
     // ─── Build `mask_auto` and `viz_bw_edge` at working resolution `(work_w, work_h)` ───
-    let mut mask_auto_u8 = vec![0u8; work_w * work_h];
+    ws.mask_auto_u8.fill(0);
     for sp in &accepted_spots {
         let r = (sp.work_radius.round() as isize).max(2);
         draw_filled_circle_u8(
-            &mut mask_auto_u8,
+            &mut ws.mask_auto_u8,
             work_w,
             work_h,
             sp.work_cx.round() as isize,
@@ -534,25 +582,25 @@ pub fn detect_from_gray_cancellable(
     }
 
     let vis_work = if (det_w, det_h) != (work_w, work_h) {
-        resize_bilinear_f32(&combined_vis_det, det_w, det_h, work_w, work_h)
+        resize_bilinear_f32(&ws.combined_vis_det, det_w, det_h, work_w, work_h)
     } else {
-        combined_vis_det
+        ws.combined_vis_det.clone()
     };
     let mut vis_sorted = vis_work.clone();
     let vis_scale = percentile_f32(&mut vis_sorted, 99.3).max(2.5) as f32;
 
-    let mut viz_bw_edge_rgb = vec![0u8; work_w * work_h * 3];
+    ws.viz_bw_edge_rgb.fill(0);
     for (i, &v) in vis_work.iter().enumerate() {
         let z = ((v / vis_scale) * 215.0).round().clamp(0.0, 255.0) as u8;
         let base = i * 3;
-        viz_bw_edge_rgb[base] = z;
-        viz_bw_edge_rgb[base + 1] = z;
-        viz_bw_edge_rgb[base + 2] = z;
+        ws.viz_bw_edge_rgb[base] = z;
+        ws.viz_bw_edge_rgb[base + 1] = z;
+        ws.viz_bw_edge_rgb[base + 2] = z;
     }
     for sp in &accepted_spots {
         let r_viz = (sp.radius * work_scale).round().max(3.0);
         draw_aa_circle_rgb(
-            &mut viz_bw_edge_rgb,
+            &mut ws.viz_bw_edge_rgb,
             work_w,
             work_h,
             sp.work_cx,
@@ -589,15 +637,16 @@ pub fn detect_from_gray_cancellable(
 
     Ok(DetectionOutput {
         result,
-        mask_auto_u8,
-        viz_bw_edge_rgb,
+        mask_auto_u8: ws.mask_auto_u8.clone(),
+        viz_bw_edge_rgb: ws.viz_bw_edge_rgb.clone(),
     })
 }
 
-/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`),
-/// matching `detect_sensor_dust` in `raw_pipeline.py:677-1020`.
+/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`)
+/// using a pre-allocated `DetectionWorkspace`.
 #[allow(clippy::too_many_arguments)]
-pub fn detect_from_gray(
+pub fn detect_from_gray_with_workspace(
+    ws: &mut DetectionWorkspace,
     gray_det: &[f32],
     det_w: usize,
     det_h: usize,
@@ -608,8 +657,8 @@ pub fn detect_from_gray(
     work_scale: f64,
     params: &DetectionParams,
 ) -> DetectionOutput {
-    detect_from_gray_cancellable(
-        gray_det, det_w, det_h, full_w, full_h, work_w, work_h, work_scale, params, None,
+    detect_from_gray_cancellable_with_workspace(
+        ws, gray_det, det_w, det_h, full_w, full_h, work_w, work_h, work_scale, params, None,
     )
     .unwrap_or_else(|_| DetectionOutput {
         result: DetectionResult {
@@ -630,6 +679,47 @@ pub fn detect_from_gray(
         mask_auto_u8: vec![0u8; work_w * work_h],
         viz_bw_edge_rgb: vec![0u8; work_w * work_h * 3],
     })
+}
+
+/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`)
+/// with cooperative cancellation support.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_from_gray_cancellable(
+    gray_det: &[f32],
+    det_w: usize,
+    det_h: usize,
+    full_w: usize,
+    full_h: usize,
+    work_w: usize,
+    work_h: usize,
+    work_scale: f64,
+    params: &DetectionParams,
+    cancel: Option<&sc_core::CancelToken>,
+) -> sc_core::Result<DetectionOutput> {
+    let mut ws = DetectionWorkspace::new();
+    detect_from_gray_cancellable_with_workspace(
+        &mut ws, gray_det, det_w, det_h, full_w, full_h, work_w, work_h, work_scale, params, cancel,
+    )
+}
+
+/// Runs Dual-Branch Sensor Dust Detection on a `det_w × det_h` perceptual luminance array (`gray_det`),
+/// matching `detect_sensor_dust` in `raw_pipeline.py:677-1020`.
+#[allow(clippy::too_many_arguments)]
+pub fn detect_from_gray(
+    gray_det: &[f32],
+    det_w: usize,
+    det_h: usize,
+    full_w: usize,
+    full_h: usize,
+    work_w: usize,
+    work_h: usize,
+    work_scale: f64,
+    params: &DetectionParams,
+) -> DetectionOutput {
+    let mut ws = DetectionWorkspace::new();
+    detect_from_gray_with_workspace(
+        &mut ws, gray_det, det_w, det_h, full_w, full_h, work_w, work_h, work_scale, params,
+    )
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ use sc_detect::annulus::fast_fit_plane;
 use sc_imgproc::{
     dilate_u8, draw_filled_circle_u8, draw_thick_line_u8, ellipse_kernel, gaussian_blur_f32,
 };
+use rayon::prelude::*;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;
@@ -179,7 +180,9 @@ pub fn compute_analytic_bboxes(
 ) -> Vec<(usize, usize, usize, usize)> {
     let skirt_pad_px = ((inpaint_r * 0.45).round() as usize).max(2);
     let feather_px = ((inpaint_r * 0.70).round() as usize).max(3);
-    let extra_dilation = (skirt_pad_px + feather_px) as f64;
+    let ring_width_px = ((inpaint_r * 1.4 + 5.0).round() as usize).max(7);
+    let ring_pad = ring_width_px + 4;
+    let extra_dilation = (skirt_pad_px + feather_px + ring_pad) as f64;
     let scale = if work_scale > 0.0 { work_scale } else { 1.0 };
 
     let mut boxes = Vec::new();
@@ -506,7 +509,6 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
     let feather_px = ((inpaint_r * 0.70).round() as usize).max(3);
     let feather_sigma = (feather_px as f64 * 0.55).max(2.0);
     let ring_width_px = ((inpaint_r * 1.4 + 5.0).round() as usize).max(7);
-    let ring_pad = ring_width_px + 4;
 
     let work_mask = build_combined_mask(
         work_h,
@@ -537,194 +539,228 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
         let k_feather = ellipse_kernel(kw_feather, kw_feather);
         let kw_ring = ring_width_px * 2 + 1;
         let k_ring = ellipse_kernel(kw_ring, kw_ring);
-        let mut rng = DeterministicRng::new(42);
         let lut_u8 = if !is_input_16bit {
             Some(build_srgb_u8_lut(exposure_scale))
         } else {
             None
         };
 
-        for (x0, y0, x1, y1) in bboxes {
-            let bx1 = x0.saturating_sub(ring_pad);
-            let by1 = y0.saturating_sub(ring_pad);
-            let bx2 = (x1 + ring_pad).min(full_w);
-            let by2 = (y1 + ring_pad).min(full_h);
-            let rw = bx2 - bx1;
-            let rh = by2 - by1;
-            if rw == 0 || rh == 0 {
-                continue;
-            }
+        struct InpaintedPatchResult {
+            bx1: usize,
+            by1: usize,
+            bx2: usize,
+            by2: usize,
+            rw: usize,
+            rh: usize,
+            healed_patch: Vec<u16>,
+            core_cnt: usize,
+        }
 
-            let roi_mask = draw_patch_mask(rw, rh, bx1, by1, &params.spots, &params.manual_strokes, work_scale);
-            if roi_mask.iter().all(|&v| v == 0) {
-                continue;
-            }
-
-            let roi_core = dilate_u8(&roi_mask, rw, rh, kw_skirt, kw_skirt, &k_skirt);
-            let core_cnt = roi_core.iter().filter(|&&v| v != 0).count();
-            if core_cnt == 0 {
-                continue;
-            }
-            inpainted_pixels += core_cnt;
-            roi_count += 1;
-
-            let roi_expanded = dilate_u8(&roi_core, rw, rh, kw_feather, kw_feather, &k_feather);
-
-            let exp_f32: Vec<f32> = roi_expanded.iter().map(|&v| v as f32 / 255.0).collect();
-            let mut roi_alpha = gaussian_blur_f32(&exp_f32, rw, rh, feather_sigma);
-            for i in 0..(rw * rh) {
-                if roi_core[i] > 0 {
-                    roi_alpha[i] = 1.0;
-                } else {
-                    roi_alpha[i] = (roi_alpha[i] * 1.12).clamp(0.0, 1.0);
+        let patches: Vec<InpaintedPatchResult> = bboxes
+            .into_par_iter()
+            .filter_map(|(bx1, by1, bx2, by2)| {
+                let rw = bx2 - bx1;
+                let rh = by2 - by1;
+                if rw == 0 || rh == 0 {
+                    return None;
                 }
-            }
 
-            let roi_outer_dilated =
-                dilate_u8(&roi_expanded, rw, rh, kw_ring, kw_ring, &k_ring);
-
-            let mut ring_coords: Vec<(usize, usize)> = Vec::new();
-            for y in 0..rh {
-                for x in 0..rw {
-                    let r_idx = y * rw + x;
-                    if roi_outer_dilated[r_idx] > 0 && roi_expanded[r_idx] == 0 {
-                        ring_coords.push((x, y));
-                    }
+                let roi_mask = draw_patch_mask(rw, rh, bx1, by1, &params.spots, &params.manual_strokes, work_scale);
+                if roi_mask.iter().all(|&v| v == 0) {
+                    return None;
                 }
-            }
 
-            let half_rw = (rw as f32 * 0.5).max(1.0);
-            let half_rh = (rh as f32 * 0.5).max(1.0);
-
-            // Fit 1st-order plane per RGB channel on [15%, 85%] trimmed green-channel ring pixels
-            let mut coeffs_3ch: Option<[[f64; 3]; 3]> = None;
-            if ring_coords.len() >= 16 {
-                let mut rx = Vec::with_capacity(ring_coords.len());
-                let mut ry = Vec::with_capacity(ring_coords.len());
-                let mut g_ring = Vec::with_capacity(ring_coords.len());
-                for &(x, y) in &ring_coords {
-                    rx.push((x as f32 - half_rw) / half_rw);
-                    ry.push((y as f32 - half_rh) / half_rh);
-                    let g_idx = ((by1 + y) * full_w + (bx1 + x)) * 3 + 1;
-                    g_ring.push(linear_16bit[g_idx] as f32);
+                let roi_core = dilate_u8(&roi_mask, rw, rh, kw_skirt, kw_skirt, &k_skirt);
+                let core_cnt = roi_core.iter().filter(|&&v| v != 0).count();
+                if core_cnt == 0 {
+                    return None;
                 }
-                let c_g = fast_fit_plane(&rx, &ry, &g_ring);
-                let mut res_g: Vec<f32> = (0..ring_coords.len())
-                    .map(|i| {
-                        g_ring[i]
-                            - (c_g[0] as f32 * rx[i] + c_g[1] as f32 * ry[i] + c_g[2] as f32)
-                    })
-                    .collect();
-                let mut res_sorted = res_g.clone();
-                let lo_r = percentile_f32(&mut res_sorted, 15.0) as f32;
-                let hi_r = percentile_f32(&mut res_sorted, 85.0) as f32;
 
-                let mut rx_c = Vec::new();
-                let mut ry_c = Vec::new();
-                let mut ch_vals = [Vec::new(), Vec::new(), Vec::new()];
-                for (i, &(x, y)) in ring_coords.iter().enumerate() {
-                    if res_g[i] >= lo_r && res_g[i] <= hi_r {
-                        rx_c.push(rx[i]);
-                        ry_c.push(ry[i]);
-                        let base = ((by1 + y) * full_w + (bx1 + x)) * 3;
-                        ch_vals[0].push(linear_16bit[base] as f32);
-                        ch_vals[1].push(linear_16bit[base + 1] as f32);
-                        ch_vals[2].push(linear_16bit[base + 2] as f32);
-                    }
-                }
-                let _ = &mut res_g;
-                if rx_c.len() >= 12 {
-                    coeffs_3ch = Some([
-                        fast_fit_plane(&rx_c, &ry_c, &ch_vals[0]),
-                        fast_fit_plane(&rx_c, &ry_c, &ch_vals[1]),
-                        fast_fit_plane(&rx_c, &ry_c, &ch_vals[2]),
-                    ]);
-                }
-            }
+                let roi_expanded = dilate_u8(&roi_core, rw, rh, kw_feather, kw_feather, &k_feather);
 
-            let harm_sigma = (rw.min(rh) as f64 * 0.10).clamp(2.0, 8.0);
-
-            for ch in 0..3 {
-                let mut roi_orig = vec![0.0f32; rw * rh];
-                for y in 0..rh {
-                    for x in 0..rw {
-                        roi_orig[y * rw + x] =
-                            linear_16bit[((by1 + y) * full_w + (bx1 + x)) * 3 + ch] as f32;
+                let exp_f32: Vec<f32> = roi_expanded.iter().map(|&v| v as f32 / 255.0).collect();
+                let mut roi_alpha = gaussian_blur_f32(&exp_f32, rw, rh, feather_sigma);
+                for i in 0..(rw * rh) {
+                    if roi_core[i] > 0 {
+                        roi_alpha[i] = 1.0;
+                    } else {
+                        roi_alpha[i] = (roi_alpha[i] * 1.12).clamp(0.0, 1.0);
                     }
                 }
 
-                // Estimate high-frequency grain MAD in ring
-                let grain_std = if params.preserve_grain && !ring_coords.is_empty() {
-                    let blurred = gaussian_blur_f32(&roi_orig, rw, rh, 1.2);
-                    let mut ring_hf: Vec<f32> = ring_coords
-                        .iter()
-                        .map(|&(x, y)| (roi_orig[y * rw + x] - blurred[y * rw + x]).abs())
-                        .collect();
-                    (median_f32(&mut ring_hf) as f32 * 1.4826).min(450.0)
-                } else {
-                    0.0
-                };
+                let roi_outer_dilated =
+                    dilate_u8(&roi_expanded, rw, rh, kw_ring, kw_ring, &k_ring);
 
-                let roi_healed = if let Some(coeffs) = coeffs_3ch {
-                    let c = coeffs[ch];
-                    let mut detrended = vec![0.0f32; rw * rh];
-                    let mut plane_2d = vec![0.0f32; rw * rh];
-                    for y in 0..rh {
-                        let ny = (y as f32 - half_rh) / half_rh;
-                        for x in 0..rw {
-                            let nx = (x as f32 - half_rw) / half_rw;
-                            let p = (c[0] as f32) * nx + (c[1] as f32) * ny + (c[2] as f32);
-                            plane_2d[y * rw + x] = p;
-                            detrended[y * rw + x] = roi_orig[y * rw + x] - p;
-                        }
-                    }
-                    let filled =
-                        telea_harmonic_fill_roi(&detrended, &roi_expanded, rw, rh, harm_sigma);
-                    filled
-                        .into_iter()
-                        .zip(plane_2d)
-                        .map(|(f, p)| p + f)
-                        .collect::<Vec<f32>>()
-                } else {
-                    telea_harmonic_fill_roi(&roi_orig, &roi_expanded, rw, rh, harm_sigma)
-                };
-
+                let mut ring_coords: Vec<(usize, usize)> = Vec::new();
                 for y in 0..rh {
                     for x in 0..rw {
                         let r_idx = y * rw + x;
-                        let alpha = roi_alpha[r_idx];
-                        if alpha <= 0.0 {
-                            continue;
+                        if roi_outer_dilated[r_idx] > 0 && roi_expanded[r_idx] == 0 {
+                            ring_coords.push((x, y));
                         }
-                        let mut h_val = roi_healed[r_idx];
-                        if grain_std > 1.0 {
-                            h_val += rng.next_gaussian() * (grain_std * 0.85);
-                        }
-                        let g_idx = ((by1 + y) * full_w + (bx1 + x)) * 3 + ch;
-                        let base_val = healed_16bit[g_idx] as f32;
-                        let blended = base_val * (1.0 - alpha) + h_val * alpha;
-                        healed_16bit[g_idx] = blended.round().clamp(0.0, 65535.0) as u16;
                     }
                 }
+
+                let half_rw = (rw as f32 * 0.5).max(1.0);
+                let half_rh = (rh as f32 * 0.5).max(1.0);
+
+                // Fit 1st-order plane per RGB channel on [15%, 85%] trimmed green-channel ring pixels
+                let mut coeffs_3ch: Option<[[f64; 3]; 3]> = None;
+                if ring_coords.len() >= 16 {
+                    let mut rx = Vec::with_capacity(ring_coords.len());
+                    let mut ry = Vec::with_capacity(ring_coords.len());
+                    let mut g_ring = Vec::with_capacity(ring_coords.len());
+                    for &(x, y) in &ring_coords {
+                        rx.push((x as f32 - half_rw) / half_rw);
+                        ry.push((y as f32 - half_rh) / half_rh);
+                        let g_idx = ((by1 + y) * full_w + (bx1 + x)) * 3 + 1;
+                        g_ring.push(linear_16bit[g_idx] as f32);
+                    }
+                    let c_g = fast_fit_plane(&rx, &ry, &g_ring);
+                    let res_g: Vec<f32> = (0..ring_coords.len())
+                        .map(|i| {
+                            g_ring[i]
+                                - (c_g[0] as f32 * rx[i] + c_g[1] as f32 * ry[i] + c_g[2] as f32)
+                        })
+                        .collect();
+                    let mut res_sorted = res_g.clone();
+                    let lo_r = percentile_f32(&mut res_sorted, 15.0) as f32;
+                    let hi_r = percentile_f32(&mut res_sorted, 85.0) as f32;
+
+                    let mut rx_c = Vec::new();
+                    let mut ry_c = Vec::new();
+                    let mut ch_vals = [Vec::new(), Vec::new(), Vec::new()];
+                    for (i, &(x, y)) in ring_coords.iter().enumerate() {
+                        if res_g[i] >= lo_r && res_g[i] <= hi_r {
+                            rx_c.push(rx[i]);
+                            ry_c.push(ry[i]);
+                            let base = ((by1 + y) * full_w + (bx1 + x)) * 3;
+                            ch_vals[0].push(linear_16bit[base] as f32);
+                            ch_vals[1].push(linear_16bit[base + 1] as f32);
+                            ch_vals[2].push(linear_16bit[base + 2] as f32);
+                        }
+                    }
+                    if rx_c.len() >= 12 {
+                        coeffs_3ch = Some([
+                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[0]),
+                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[1]),
+                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[2]),
+                        ]);
+                    }
+                }
+
+                let harm_sigma = (rw.min(rh) as f64 * 0.10).clamp(2.0, 8.0);
+                let mut healed_patch = vec![0u16; rw * rh * 3];
+
+                // Deterministic PRNG seed isolated per patch
+                let mut rng = DeterministicRng::new(
+                    42u64
+                        .wrapping_add((by1 as u64) << 32)
+                        .wrapping_add(bx1 as u64),
+                );
+
+                for ch in 0..3 {
+                    let mut roi_orig = vec![0.0f32; rw * rh];
+                    for y in 0..rh {
+                        for x in 0..rw {
+                            roi_orig[y * rw + x] =
+                                linear_16bit[((by1 + y) * full_w + (bx1 + x)) * 3 + ch] as f32;
+                        }
+                    }
+
+                    // Estimate high-frequency grain MAD in ring
+                    let grain_std = if params.preserve_grain && !ring_coords.is_empty() {
+                        let blurred = gaussian_blur_f32(&roi_orig, rw, rh, 1.2);
+                        let mut ring_hf: Vec<f32> = ring_coords
+                            .iter()
+                            .map(|&(x, y)| (roi_orig[y * rw + x] - blurred[y * rw + x]).abs())
+                            .collect();
+                        (median_f32(&mut ring_hf) as f32 * 1.4826).min(450.0)
+                    } else {
+                        0.0
+                    };
+
+                    let roi_healed = if let Some(coeffs) = coeffs_3ch {
+                        let c = coeffs[ch];
+                        let mut detrended = vec![0.0f32; rw * rh];
+                        let mut plane_2d = vec![0.0f32; rw * rh];
+                        for y in 0..rh {
+                            let ny = (y as f32 - half_rh) / half_rh;
+                            for x in 0..rw {
+                                let nx = (x as f32 - half_rw) / half_rw;
+                                let p = (c[0] as f32) * nx + (c[1] as f32) * ny + (c[2] as f32);
+                                plane_2d[y * rw + x] = p;
+                                detrended[y * rw + x] = roi_orig[y * rw + x] - p;
+                            }
+                        }
+                        let filled =
+                            telea_harmonic_fill_roi(&detrended, &roi_expanded, rw, rh, harm_sigma);
+                        filled
+                            .into_iter()
+                            .zip(plane_2d)
+                            .map(|(f, p)| p + f)
+                            .collect::<Vec<f32>>()
+                    } else {
+                        telea_harmonic_fill_roi(&roi_orig, &roi_expanded, rw, rh, harm_sigma)
+                    };
+
+                    for y in 0..rh {
+                        for x in 0..rw {
+                            let r_idx = y * rw + x;
+                            let alpha = roi_alpha[r_idx];
+                            let p_idx = (y * rw + x) * 3 + ch;
+                            if alpha <= 0.0 {
+                                healed_patch[p_idx] = roi_orig[r_idx] as u16;
+                            } else {
+                                let mut h_val = roi_healed[r_idx];
+                                if grain_std > 1.0 {
+                                    h_val += rng.next_gaussian() * (grain_std * 0.85);
+                                }
+                                let base_val = roi_orig[r_idx];
+                                let blended = base_val * (1.0 - alpha) + h_val * alpha;
+                                healed_patch[p_idx] = blended.round().clamp(0.0, 65535.0) as u16;
+                            }
+                        }
+                    }
+                }
+
+                Some(InpaintedPatchResult {
+                    bx1,
+                    by1,
+                    bx2,
+                    by2,
+                    rw,
+                    rh,
+                    healed_patch,
+                    core_cnt,
+                })
+            })
+            .collect();
+
+        for patch in patches {
+            inpainted_pixels += patch.core_cnt;
+            roi_count += 1;
+
+            for y in 0..patch.rh {
+                let src_offset = y * patch.rw * 3;
+                let dst_offset = ((patch.by1 + y) * full_w + patch.bx1) * 3;
+                let len = patch.rw * 3;
+                healed_16bit[dst_offset..dst_offset + len]
+                    .copy_from_slice(&patch.healed_patch[src_offset..src_offset + len]);
             }
 
             // Update working preview checkpoint on this ROI
-            let wx1 = ((bx1 as f64 * work_scale).floor() as usize).min(work_w);
-            let wy1 = ((by1 as f64 * work_scale).floor() as usize).min(work_h);
-            let wx2 = ((bx2 as f64 * work_scale).ceil() as usize).min(work_w);
-            let wy2 = ((by2 as f64 * work_scale).ceil() as usize).min(work_h);
+            let wx1 = ((patch.bx1 as f64 * work_scale).floor() as usize).min(work_w);
+            let wy1 = ((patch.by1 as f64 * work_scale).floor() as usize).min(work_h);
+            let wx2 = ((patch.bx2 as f64 * work_scale).ceil() as usize).min(work_w);
+            let wy2 = ((patch.by2 as f64 * work_scale).ceil() as usize).min(work_h);
             if wx2 > wx1 && wy2 > wy1 {
-                let mut patch_16 = Vec::with_capacity(rw * rh * 3);
-                for y in by1..by2 {
-                    let row = &healed_16bit[y * full_w * 3..(y + 1) * full_w * 3];
-                    patch_16.extend_from_slice(&row[bx1 * 3..bx2 * 3]);
-                }
                 let ww_p = wx2 - wx1;
                 let wh_p = wy2 - wy1;
-                let patch_work = if (rw, rh) != (ww_p, wh_p) {
-                    downsample_patch_rgb16(&patch_16, rw, rh, ww_p, wh_p)
+                let patch_work = if (patch.rw, patch.rh) != (ww_p, wh_p) {
+                    downsample_patch_rgb16(&patch.healed_patch, patch.rw, patch.rh, ww_p, wh_p)
                 } else {
-                    patch_16
+                    patch.healed_patch
                 };
                 for y in 0..wh_p {
                     for x in 0..ww_p {
@@ -1291,6 +1327,40 @@ mod tests {
         assert_eq!(healed_16[far_idx], 30000u16);
         assert_eq!(healed_16[far_idx + 1], 30000u16);
         assert_eq!(healed_16[far_idx + 2], 30000u16);
+    }
+
+    #[test]
+    fn test_parallel_multi_bbox_inpainting() {
+        let w = 300;
+        let h = 300;
+        let linear_16bit = vec![25000u16; w * h * 3];
+        let work_orig_u8 = vec![100u8; w * h * 3];
+        let meta = make_meta(w, h);
+
+        let spot1 = make_spot("1", 50.0, 50.0, 4.0);
+        let spot2 = make_spot("2", 250.0, 50.0, 4.0);
+        let spot3 = make_spot("3", 150.0, 250.0, 4.0);
+
+        let params = InpaintParams {
+            inpaint_radius: 6.0,
+            preserve_grain: true,
+            spots: vec![spot1, spot2, spot3],
+            manual_strokes: vec![],
+        };
+
+        let (healed_16, healed_work, _mask, inpainted_px, roi_cnt) =
+            inpaint_linear16_and_work_srgb_in_memory(&linear_16bit, &work_orig_u8, &meta, &params);
+
+        assert_eq!(roi_cnt, 3);
+        assert!(inpainted_px > 0);
+        assert_eq!(healed_16.len(), w * h * 3);
+        assert_eq!(healed_work.len(), w * h * 3);
+
+        // Center pixel (150, 150) is far from any spot and must remain bit-identical
+        let center_idx = (150 * w + 150) * 3;
+        assert_eq!(healed_16[center_idx], 25000u16);
+        assert_eq!(healed_16[center_idx + 1], 25000u16);
+        assert_eq!(healed_16[center_idx + 2], 25000u16);
     }
 }
 

@@ -47,55 +47,105 @@ pub fn gaussian_blur_f32(src: &[f32], w: usize, h: usize, sigma: f64) -> Vec<f32
     if w == 0 || h == 0 || src.len() < w.saturating_mul(h) {
         return Vec::new();
     }
+    let mut tmp = vec![0.0f32; w * h];
+    let mut dst = vec![0.0f32; w * h];
+    gaussian_blur_f32_into(src, &mut tmp, &mut dst, w, h, sigma);
+    dst
+}
+
+/// In-place reusable buffer version of `gaussian_blur_f32`.
+pub fn gaussian_blur_f32_into(
+    src: &[f32],
+    tmp: &mut [f32],
+    dst: &mut [f32],
+    w: usize,
+    h: usize,
+    sigma: f64,
+) {
+    let n = w * h;
+    if w == 0 || h == 0 || src.len() < n || tmp.len() < n || dst.len() < n {
+        return;
+    }
     // Pyramidal acceleration for large sigma on large images (e.g. background estimation)
     if sigma >= 8.0 && w >= 256 && h >= 256 {
         let (down, dw, dh) = downsample_2x_f32(src, w, h);
         let blurred_down = gaussian_blur_f32(&down, dw, dh, sigma * 0.5);
-        return upsample_bilinear_f32(&blurred_down, dw, dh, w, h);
+        upsample_bilinear_f32_into(&blurred_down, dw, dh, dst, w, h);
+        return;
     }
     let kernel = build_gaussian_kernel(sigma);
     if kernel.len() <= 1 {
-        return src[..w * h].to_vec();
+        dst[..n].copy_from_slice(&src[..n]);
+        return;
     }
     let radius = (kernel.len() / 2) as isize;
+    let k_len = kernel.len();
 
     // 1. Horizontal pass
-    let mut tmp = vec![0.0f32; w * h];
-    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+    tmp[..n].par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
         let in_row = &src[y * w..(y + 1) * w];
-        for (x, out_px) in out_row.iter_mut().enumerate() {
+        let r = radius as usize;
+        let inner_x1 = w.saturating_sub(r);
+
+        for x in 0..r.min(w) {
             let xi = x as isize;
             let mut acc = 0.0f32;
-            if xi >= radius && (x + radius as usize) < w {
-                let start = (xi - radius) as usize;
-                let slice = &in_row[start..start + kernel.len()];
+            for (ki, &k) in kernel.iter().enumerate() {
+                let sx = reflect_101(xi + ki as isize - radius, w);
+                acc += in_row[sx] * k;
+            }
+            out_row[x] = acc;
+        }
+
+        if inner_x1 > r {
+            for x in r..inner_x1 {
+                let start = x - r;
+                let slice = &in_row[start..start + k_len];
+                let mut acc = 0.0f32;
                 for (&v, &k) in slice.iter().zip(kernel.iter()) {
                     acc += v * k;
                 }
-            } else {
-                for (ki, &k) in kernel.iter().enumerate() {
-                    let sx = reflect_101(xi + ki as isize - radius, w);
-                    acc += in_row[sx] * k;
+                out_row[x] = acc;
+            }
+        }
+
+        for x in inner_x1.max(r)..w {
+            let xi = x as isize;
+            let mut acc = 0.0f32;
+            for (ki, &k) in kernel.iter().enumerate() {
+                let sx = reflect_101(xi + ki as isize - radius, w);
+                acc += in_row[sx] * k;
+            }
+            out_row[x] = acc;
+        }
+    });
+
+    // 2. Vertical pass (interior rows directly slice without reflect_101)
+    let inner_y0 = radius as usize;
+    let inner_y1 = h.saturating_sub(radius as usize);
+
+    dst[..n].par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
+        let yi = y as isize;
+        out_row.fill(0.0);
+
+        if y >= inner_y0 && y < inner_y1 {
+            for (ki, &k) in kernel.iter().enumerate() {
+                let sy = y + ki - inner_y0;
+                let in_row = &tmp[sy * w..(sy + 1) * w];
+                for (out_px, &v) in out_row.iter_mut().zip(in_row.iter()) {
+                    *out_px += v * k;
                 }
             }
-            *out_px = acc;
-        }
-    });
-
-    // 2. Vertical pass
-    let mut dst = vec![0.0f32; w * h];
-    dst.par_chunks_mut(w).enumerate().for_each(|(y, out_row)| {
-        let yi = y as isize;
-        for (ki, &k) in kernel.iter().enumerate() {
-            let sy = reflect_101(yi + ki as isize - radius, h);
-            let in_row = &tmp[sy * w..(sy + 1) * w];
-            for (out_px, &v) in out_row.iter_mut().zip(in_row.iter()) {
-                *out_px += v * k;
+        } else {
+            for (ki, &k) in kernel.iter().enumerate() {
+                let sy = reflect_101(yi + ki as isize - radius, h);
+                let in_row = &tmp[sy * w..(sy + 1) * w];
+                for (out_px, &v) in out_row.iter_mut().zip(in_row.iter()) {
+                    *out_px += v * k;
+                }
             }
         }
     });
-
-    dst
 }
 
 /// Downsamples a 2D float image by 2x using 2x2 box averaging.
@@ -127,6 +177,19 @@ pub fn upsample_bilinear_f32(src: &[f32], sw: usize, sh: usize, target_w: usize,
         return src[..target_w * target_h].to_vec();
     }
     let mut dst = vec![0.0f32; target_w * target_h];
+    upsample_bilinear_f32_into(src, sw, sh, &mut dst, target_w, target_h);
+    dst
+}
+
+/// In-place buffer version of `upsample_bilinear_f32`.
+pub fn upsample_bilinear_f32_into(src: &[f32], sw: usize, sh: usize, dst: &mut [f32], target_w: usize, target_h: usize) {
+    if target_w == 0 || target_h == 0 || dst.len() < target_w * target_h {
+        return;
+    }
+    if sw == target_w && sh == target_h {
+        dst[..target_w * target_h].copy_from_slice(&src[..target_w * target_h]);
+        return;
+    }
     let x_scale = sw as f32 / target_w as f32;
     let y_scale = sh as f32 / target_h as f32;
 
@@ -153,7 +216,6 @@ pub fn upsample_bilinear_f32(src: &[f32], sw: usize, sh: usize, target_w: usize,
             out_row[dx] = top * (1.0 - wy) + bot * wy;
         }
     }
-    dst
 }
 
 #[cfg(test)]
