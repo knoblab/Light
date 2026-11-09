@@ -67,7 +67,12 @@ pub fn gaussian_blur_f32_into(
         return;
     }
     // Pyramidal acceleration for large sigma on large images (e.g. background estimation)
-    if sigma >= 8.0 && w >= 256 && h >= 256 {
+    if sigma >= 14.0 && w >= 512 && h >= 512 {
+        let (down, dw, dh) = downsample_4x_f32(src, w, h);
+        let blurred_down = gaussian_blur_f32(&down, dw, dh, sigma * 0.25);
+        upsample_bilinear_f32_into(&blurred_down, dw, dh, dst, w, h);
+        return;
+    } else if sigma >= 7.0 && w >= 256 && h >= 256 {
         let (down, dw, dh) = downsample_2x_f32(src, w, h);
         let blurred_down = gaussian_blur_f32(&down, dw, dh, sigma * 0.5);
         upsample_bilinear_f32_into(&blurred_down, dw, dh, dst, w, h);
@@ -166,6 +171,12 @@ pub fn downsample_2x_f32(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, u
         }
     }
     (dst, dw, dh)
+}
+
+/// Downsamples a 2D float image by 4x using hierarchical 2x box averaging.
+pub fn downsample_4x_f32(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
+    let (d2, dw2, dh2) = downsample_2x_f32(src, w, h);
+    downsample_2x_f32(&d2, dw2, dh2)
 }
 
 /// Upsamples a 2D float image to `(target_w, target_h)` using bilinear interpolation.

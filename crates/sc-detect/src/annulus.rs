@@ -242,7 +242,7 @@ pub fn eval_single_radius_annulus(
     let min_depth = (if is_sharp_branch { 2.10 } else { 1.08 }) * sens_factor;
 
     let approx_bg = av.iter().map(|&v| v as f64).sum::<f64>() / n_ann as f64;
-    if approx_bg < 84.0 {
+    if approx_bg < 48.0 {
         return None;
     }
 
@@ -272,8 +272,8 @@ pub fn eval_single_radius_annulus(
     let p95_res = res_sorted[((n_ann as f64 * 0.95) as usize).min(n_ann - 1)] as f64;
     let ann_span = p95_res - p05_res;
 
-    let max_ann_all_std = (if is_sharp_branch { 1.85 } else { 1.48 }) / prot;
-    let max_ann_span = (if is_sharp_branch { 5.20 } else { 4.30 }) / prot;
+    let max_ann_all_std = (if is_sharp_branch { 2.25 } else { 2.10 }) / prot;
+    let max_ann_span = (if is_sharp_branch { 5.80 } else { 5.20 }) / prot;
     if ann_all_std > max_ann_all_std || ann_span > max_ann_span {
         return None;
     }
@@ -307,7 +307,7 @@ pub fn eval_single_radius_annulus(
     };
 
     let plane_center = coeffs[2];
-    if plane_center < 86.0 {
+    if plane_center < 50.0 {
         return None;
     }
 

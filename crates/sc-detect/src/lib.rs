@@ -219,7 +219,7 @@ pub fn detect_from_gray_cancellable_with_workspace(
         ws.bm_sharp.fill(0);
         for i in 0..n_det {
             if ws.valid_photo_mask[i]
-                && ws.g8[i] >= 86.0
+                && ws.g8[i] >= 50.0
                 && ws.bg_std_map[i] <= max_std
                 && ws.hf_texture[i] <= max_hf
             {
@@ -300,9 +300,9 @@ pub fn detect_from_gray_cancellable_with_workspace(
 
         for i in 0..n_det {
             ws.quiet_sky_mask[i] = ws.valid_photo_mask[i]
-                && ws.bg_mean_22[i] >= 86.0
-                && ws.bg_std_map[i] <= 1.65
-                && ws.hf_texture[i] <= 1.1;
+                && ws.bg_mean_22[i] >= 50.0
+                && ws.bg_std_map[i] <= (2.85 / prot)
+                && ws.hf_texture[i] <= (1.85 / prot);
         }
         let qsp = resize_nearest_bool(&ws.quiet_sky_mask, det_w, det_h, pyr_w, pyr_h);
         ws.quiet_sky_pyr.copy_from_slice(&qsp);
@@ -323,7 +323,7 @@ pub fn detect_from_gray_cancellable_with_workspace(
 
         let bokeh_min_r = min_r_det.max(7.2);
         let bokeh_max_r = (max_r_det * 0.98).max(bokeh_min_r + 6.0);
-        let num_scales = 12usize;
+        let num_scales = 8usize;
         let bokeh_radii: Vec<f64> = (0..num_scales)
             .map(|i| {
                 let t = i as f64 / (num_scales - 1) as f64;
@@ -413,7 +413,7 @@ pub fn detect_from_gray_cancellable_with_workspace(
         let max_vis_std = 3.0 / prot;
         for i in 0..n_det {
             if ws.valid_photo_mask[i]
-                && ws.bg_mean_22[i] >= 86.0
+                && ws.bg_mean_22[i] >= 50.0
                 && ws.bg_std_map[i] <= max_vis_std
                 && ws.bokeh_max_z[i] > ws.combined_vis_det[i]
             {
@@ -455,7 +455,7 @@ pub fn detect_from_gray_cancellable_with_workspace(
                 let py = ((py_p as f64 / pyr_scale_y).round() as usize).min(det_h - 1);
                 let det_idx = py * det_w + px;
                 if !valid_photo_mask_ref[det_idx]
-                    || bg_mean_22_ref[det_idx] < 86.0
+                    || bg_mean_22_ref[det_idx] < 50.0
                     || bg_std_map_ref[det_idx] > max_bokeh_std
                 {
                     return None;

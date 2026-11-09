@@ -178,9 +178,9 @@ pub fn compute_analytic_bboxes(
     strokes: &[ManualBrushStroke],
     inpaint_r: f64,
 ) -> Vec<(usize, usize, usize, usize)> {
-    let skirt_pad_px = ((inpaint_r * 0.45).round() as usize).max(2);
-    let feather_px = ((inpaint_r * 0.70).round() as usize).max(3);
-    let ring_width_px = ((inpaint_r * 1.4 + 5.0).round() as usize).max(7);
+    let skirt_pad_px = ((inpaint_r * 0.80).round() as usize).max(4);
+    let feather_px = ((inpaint_r * 0.90).round() as usize).max(4);
+    let ring_width_px = ((inpaint_r * 1.6 + 6.0).round() as usize).max(8);
     let ring_pad = ring_width_px + 4;
     let extra_dilation = (skirt_pad_px + feather_px + ring_pad) as f64;
     let scale = if work_scale > 0.0 { work_scale } else { 1.0 };
@@ -404,9 +404,9 @@ impl DeterministicRng {
     }
 }
 
-/// Fast boundary-weighted Telea / inverse-distance harmonic fill on a detrended 2D ROI patch.
-/// For every masked pixel `(x, y)` (`mask[y * rw + x] != 0`), interpolates from surrounding
-/// unmasked boundary pixels weighted by `1 / (dist^2 + 1)^1.5`, followed by Gaussian harmonic smoothing.
+/// Fast boundary-weighted Telea FMM + harmonic fill on a detrended 2D ROI patch.
+/// Pixels where `mask[y * rw + x] != 0` are inpainted using Eikonal Fast Marching Method
+/// based on Telea (2004), preserving image gradients and smooth level sets.
 fn telea_harmonic_fill_roi(
     detrended: &[f32],
     mask: &[u8],
@@ -414,78 +414,8 @@ fn telea_harmonic_fill_roi(
     rh: usize,
     harm_sigma: f64,
 ) -> Vec<f32> {
-    // Collect boundary pixels: unmasked pixels (`mask == 0`) that have at least one masked 8-neighbour
-    let mut boundary_pts: Vec<(f32, f32, f32)> = Vec::new();
-    for y in 0..rh {
-        for x in 0..rw {
-            if mask[y * rw + x] != 0 {
-                continue;
-            }
-            let mut adj = false;
-            for dy in -1isize..=1 {
-                for dx in -1isize..=1 {
-                    let ny = y as isize + dy;
-                    let nx = x as isize + dx;
-                    if ny >= 0
-                        && ny < rh as isize
-                        && nx >= 0
-                        && nx < rw as isize
-                        && mask[ny as usize * rw + nx as usize] != 0
-                    {
-                        adj = true;
-                        break;
-                    }
-                }
-                if adj {
-                    break;
-                }
-            }
-            if adj {
-                boundary_pts.push((x as f32, y as f32, detrended[y * rw + x]));
-            }
-        }
-    }
-
-    let mut telea = detrended.to_vec();
-    if !boundary_pts.is_empty() {
-        let stride = (boundary_pts.len() / 64).max(1);
-        for y in 0..rh {
-            for x in 0..rw {
-                let idx = y * rw + x;
-                if mask[idx] == 0 {
-                    continue;
-                }
-                let fx = x as f32;
-                let fy = y as f32;
-                let mut w_sum = 0.0f32;
-                let mut v_sum = 0.0f32;
-                for &(bx, by, bv) in boundary_pts.iter().step_by(stride) {
-                    let d2 = (fx - bx).powi(2) + (fy - by).powi(2) + 1.0;
-                    let w = 1.0 / (d2 * d2.sqrt());
-                    w_sum += w;
-                    v_sum += w * bv;
-                }
-                if w_sum > 1e-12 {
-                    telea[idx] = v_sum / w_sum;
-                } else {
-                    telea[idx] = 0.0;
-                }
-            }
-        }
-    } else {
-        for i in 0..(rw * rh) {
-            if mask[i] != 0 {
-                telea[i] = 0.0;
-            }
-        }
-    }
-
-    let smooth = gaussian_blur_f32(&telea, rw, rh, harm_sigma);
-    let mut filled = Vec::with_capacity(rw * rh);
-    for i in 0..(rw * rh) {
-        filled.push(0.45 * telea[i] + 0.55 * smooth[i]);
-    }
-    filled
+    let r_eff = (rw.min(rh) as f32 * 0.15).clamp(2.5, 8.0);
+    sc_imgproc::inpaint_telea_harmonic_f32(detrended, mask, rw, rh, r_eff, harm_sigma)
 }
 
 /// Pure in-memory 16-bit Plane-Detrended Harmonic + Telea inpainting on `linear_16bit` and `work_orig_u8`.
@@ -505,10 +435,10 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
     let is_input_16bit = meta.is_input_16_bit;
 
     let inpaint_r = params.inpaint_radius.clamp(3.0, 25.0);
-    let skirt_pad_px = ((inpaint_r * 0.45).round() as usize).max(2);
-    let feather_px = ((inpaint_r * 0.70).round() as usize).max(3);
-    let feather_sigma = (feather_px as f64 * 0.55).max(2.0);
-    let ring_width_px = ((inpaint_r * 1.4 + 5.0).round() as usize).max(7);
+    let skirt_pad_px = ((inpaint_r * 0.80).round() as usize).max(4);
+    let feather_px = ((inpaint_r * 0.90).round() as usize).max(4);
+    let feather_sigma = (feather_px as f64 * 0.65).max(2.5);
+    let ring_width_px = ((inpaint_r * 1.6 + 6.0).round() as usize).max(8);
 
     let work_mask = build_combined_mask(
         work_h,
@@ -578,13 +508,17 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
 
                 let roi_expanded = dilate_u8(&roi_core, rw, rh, kw_feather, kw_feather, &k_feather);
 
-                let exp_f32: Vec<f32> = roi_expanded.iter().map(|&v| v as f32 / 255.0).collect();
-                let mut roi_alpha = gaussian_blur_f32(&exp_f32, rw, rh, feather_sigma);
+                let core_f32: Vec<f32> = roi_core.iter().map(|&v| if v > 0 { 1.0f32 } else { 0.0f32 }).collect();
+                let blurred_core = gaussian_blur_f32(&core_f32, rw, rh, feather_sigma);
+                let mut roi_alpha = vec![0.0f32; rw * rh];
                 for i in 0..(rw * rh) {
                     if roi_core[i] > 0 {
                         roi_alpha[i] = 1.0;
+                    } else if roi_expanded[i] > 0 {
+                        let t = (blurred_core[i] * 1.65).clamp(0.0, 1.0);
+                        roi_alpha[i] = t * t * (3.0 - 2.0 * t);
                     } else {
-                        roi_alpha[i] = (roi_alpha[i] * 1.12).clamp(0.0, 1.0);
+                        roi_alpha[i] = 0.0;
                     }
                 }
 
@@ -604,7 +538,7 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                 let half_rw = (rw as f32 * 0.5).max(1.0);
                 let half_rh = (rh as f32 * 0.5).max(1.0);
 
-                // Fit 1st-order plane per RGB channel on [15%, 85%] trimmed green-channel ring pixels
+                // Joint color-consistent plane fitting on ring pixels to eliminate color casts
                 let mut coeffs_3ch: Option<[[f64; 3]; 3]> = None;
                 if ring_coords.len() >= 16 {
                     let mut rx = Vec::with_capacity(ring_coords.len());
@@ -641,10 +575,19 @@ pub fn inpaint_linear16_and_work_srgb_in_memory(
                         }
                     }
                     if rx_c.len() >= 12 {
+                        let c_g_clean = fast_fit_plane(&rx_c, &ry_c, &ch_vals[1]);
+                        let mean_g = (ch_vals[1].iter().map(|&v| v as f64).sum::<f64>() / rx_c.len() as f64).max(1.0);
+                        let mean_r = ch_vals[0].iter().map(|&v| v as f64).sum::<f64>() / rx_c.len() as f64;
+                        let mean_b = ch_vals[2].iter().map(|&v| v as f64).sum::<f64>() / rx_c.len() as f64;
+
+                        // Lock chromatic slopes proportionally to green plane to guarantee 0% color cast
+                        let k_r = (mean_r / mean_g).clamp(0.2, 5.0);
+                        let k_b = (mean_b / mean_g).clamp(0.2, 5.0);
+
                         coeffs_3ch = Some([
-                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[0]),
-                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[1]),
-                            fast_fit_plane(&rx_c, &ry_c, &ch_vals[2]),
+                            [c_g_clean[0] * k_r, c_g_clean[1] * k_r, c_g_clean[2] * k_r],
+                            c_g_clean,
+                            [c_g_clean[0] * k_b, c_g_clean[1] * k_b, c_g_clean[2] * k_b],
                         ]);
                     }
                 }

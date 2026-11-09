@@ -31,7 +31,10 @@ pub mod telea;
 pub use contours::{ComponentCandidate, extract_sharp_candidates};
 pub use dist_transform::pad_invalid_border_nearest;
 pub use draw::{draw_aa_circle_rgb, draw_filled_circle_u8, draw_thick_line_u8};
-pub use gaussian::{gaussian_blur_f32, gaussian_blur_f32_into, upsample_bilinear_f32_into};
+pub use gaussian::{
+    downsample_2x_f32, downsample_4x_f32, gaussian_blur_f32, gaussian_blur_f32_into,
+    upsample_bilinear_f32, upsample_bilinear_f32_into,
+};
 pub use morph::{dilate_f32, dilate_u8, ellipse_kernel};
 pub use resize::{
     resize_bilinear_f32, resize_inter_area_f32, resize_inter_area_u16_rgb, resize_nearest_bool,
