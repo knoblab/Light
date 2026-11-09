@@ -165,7 +165,7 @@ export function App() {
   const [exportingFormat, setExportingFormat] = useState<string | null>(null);
 
   const handleProgress = (percent: number, label?: string, info?: DetailedProgressInfo) => {
-    setProgressPercent((prev) => Math.max(prev, Math.min(100, Math.round(percent))));
+    setProgressPercent(Math.min(100, Math.max(0, Math.round(percent))));
     if (label) setProcessingLabel(label);
     if (info) setProgressInfo(info);
   };

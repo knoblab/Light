@@ -112,6 +112,7 @@ fn grad_t(t: &[f32], flags: &[u8], w: usize, h: usize, x: usize, y: usize) -> (f
     (gx, gy)
 }
 
+#[allow(dead_code)]
 #[inline]
 fn grad_img(img: &[f32], flags: &[u8], w: usize, h: usize, x: usize, y: usize) -> (f32, f32) {
     let val = img[y * w + x];
@@ -208,14 +209,15 @@ fn inpaint_point(
             let t_diff = (tp - t[q_idx]).abs();
             let w_lev = 1.0 / (1.0 + t_diff);
 
-            let w_total = w_dir * w_dst * w_lev;
-
             // Image gradient at q: \nabla I(q)
             let (grad_ix, grad_iy) = grad_img(img, flags, w, h, qx, qy);
 
-            // First-order Taylor prediction: I(q) + \nabla I(q) . (p - q)
-            let val_pred = img[q_idx] + grad_ix * rx + grad_iy * ry;
+            // First-order Taylor prediction with slope clamping to satisfy the Maximum Principle
+            // and eliminate runaway chromatic starburst spikes
+            let grad_step = (grad_ix * rx + grad_iy * ry).clamp(-12.0, 12.0);
+            let val_pred = img[q_idx] + grad_step;
 
+            let w_total = w_dir * w_dst * w_lev;
             val_sum += w_total * val_pred;
             weight_sum += w_total;
         }

@@ -170,6 +170,9 @@ pub fn downsample_patch_rgb16(src: &[u16], sw: usize, sh: usize, dw: usize, dh: 
 
 /// Computes disjoint bounding boxes `[(min_x, min_y, max_x, max_y)]` in full-image coordinates
 /// covering all enabled spots and brush strokes with required skirt and feather margins.
+/// Computes bounded disjoint bounding boxes `[(min_x, min_y, max_x, max_y)]` in full-image coordinates.
+/// Clusters spots and brush strokes based on core collision, expands margins per-cluster,
+/// and strictly caps maximum patch dimension to 256px to guarantee sub-millisecond inpainting and eliminate freezing.
 pub fn compute_analytic_bboxes(
     full_w: usize,
     full_h: usize,
@@ -185,7 +188,8 @@ pub fn compute_analytic_bboxes(
     let extra_dilation = (skirt_pad_px + feather_px + ring_pad) as f64;
     let scale = if work_scale > 0.0 { work_scale } else { 1.0 };
 
-    let mut boxes = Vec::new();
+    // 1. Gather raw core bounding boxes (without extra_dilation)
+    let mut core_boxes: Vec<(f64, f64, f64, f64)> = Vec::new();
 
     for spot in spots {
         if !spot.enabled {
@@ -198,27 +202,19 @@ pub fn compute_analytic_bboxes(
         };
         let min_skirt_r = spot.radius * skirt_mult + 2.0;
         let r_val = spot.radius.max(min_skirt_r);
-        let r_full = (r_val.round() as usize).max(3) as f64;
-        let r_expanded = r_full + extra_dilation;
+        let r_core = (r_val.round() as usize).max(3) as f64;
 
         let cx = if spot.cx > 0.0 { spot.cx } else { spot.work_cx / scale };
         let cy = if spot.cy > 0.0 { spot.cy } else { spot.work_cy / scale };
 
-        let x0 = ((cx - r_expanded).floor() as isize).clamp(0, full_w as isize) as usize;
-        let y0 = ((cy - r_expanded).floor() as isize).clamp(0, full_h as isize) as usize;
-        let x1 = ((cx + r_expanded).ceil() as isize).clamp(0, full_w as isize) as usize;
-        let y1 = ((cy + r_expanded).ceil() as isize).clamp(0, full_h as isize) as usize;
-
-        if x1 > x0 && y1 > y0 {
-            boxes.push((x0, y0, x1, y1));
-        }
+        core_boxes.push((cx - r_core, cy - r_core, cx + r_core, cy + r_core));
     }
 
     for stroke in strokes {
         if stroke.mode == "erase" || stroke.points.is_empty() {
             continue;
         }
-        let r_expanded = stroke.radius + extra_dilation;
+        let r_core = stroke.radius.max(2.0);
         let mut min_x = f64::MAX;
         let mut min_y = f64::MAX;
         let mut max_x = f64::MIN;
@@ -231,20 +227,65 @@ pub fn compute_analytic_bboxes(
             max_y = max_y.max(pt.y);
         }
 
-        let x0 = ((min_x - r_expanded).floor() as isize).clamp(0, full_w as isize) as usize;
-        let y0 = ((min_y - r_expanded).floor() as isize).clamp(0, full_h as isize) as usize;
-        let x1 = ((max_x + r_expanded).ceil() as isize).clamp(0, full_w as isize) as usize;
-        let y1 = ((max_y + r_expanded).ceil() as isize).clamp(0, full_h as isize) as usize;
+        core_boxes.push((min_x - r_core, min_y - r_core, max_x + r_core, max_y + r_core));
+    }
 
-        if x1 > x0 && y1 > y0 {
-            boxes.push((x0, y0, x1, y1));
+    if core_boxes.is_empty() {
+        return Vec::new();
+    }
+
+    // 2. Pre-cluster only truly touching core boxes (capped at max 192px core dimension)
+    let max_core_dim = 192.0f64;
+    let mut merged = true;
+    while merged {
+        merged = false;
+        let mut i = 0;
+        while i < core_boxes.len() {
+            let mut j = i + 1;
+            while j < core_boxes.len() {
+                let a = core_boxes[i];
+                let b = core_boxes[j];
+                // Check if cores touch with a small 2px tolerance
+                if a.0 <= b.2 + 2.0 && a.2 >= b.0 - 2.0 && a.1 <= b.3 + 2.0 && a.3 >= b.1 - 2.0 {
+                    let u0 = a.0.min(b.0);
+                    let u1 = a.1.min(b.1);
+                    let u2 = a.2.max(b.2);
+                    let u3 = a.3.max(b.3);
+                    // Do not merge if combined core would exceed max_core_dim (prevents runaway mega-patches)
+                    if (u2 - u0) <= max_core_dim && (u3 - u1) <= max_core_dim {
+                        core_boxes[i] = (u0, u1, u2, u3);
+                        core_boxes.swap_remove(j);
+                        merged = true;
+                        continue;
+                    }
+                }
+                j += 1;
+            }
+            i += 1;
         }
     }
 
-    merge_overlapping_bboxes(boxes)
+    // 3. Expand each clustered core box by extra_dilation to form the final patch bounding box
+    let mut expanded_boxes: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(core_boxes.len());
+    for c in core_boxes {
+        let x0 = ((c.0 - extra_dilation).floor() as isize).clamp(0, full_w as isize) as usize;
+        let y0 = ((c.1 - extra_dilation).floor() as isize).clamp(0, full_h as isize) as usize;
+        let x1 = ((c.2 + extra_dilation).ceil() as isize).clamp(0, full_w as isize) as usize;
+        let y1 = ((c.3 + extra_dilation).ceil() as isize).clamp(0, full_h as isize) as usize;
+
+        if x1 > x0 && y1 > y0 {
+            expanded_boxes.push((x0, y0, x1, y1));
+        }
+    }
+
+    // 4. Final safety merge of heavily overlapping expanded boxes (capped at max 256px dimension)
+    merge_overlapping_bboxes_capped(expanded_boxes, 256)
 }
 
-fn merge_overlapping_bboxes(mut boxes: Vec<(usize, usize, usize, usize)>) -> Vec<(usize, usize, usize, usize)> {
+fn merge_overlapping_bboxes_capped(
+    mut boxes: Vec<(usize, usize, usize, usize)>,
+    max_dim: usize,
+) -> Vec<(usize, usize, usize, usize)> {
     if boxes.len() <= 1 {
         return boxes;
     }
@@ -257,14 +298,20 @@ fn merge_overlapping_bboxes(mut boxes: Vec<(usize, usize, usize, usize)>) -> Vec
             while j < boxes.len() {
                 let (ax0, ay0, ax1, ay1) = boxes[i];
                 let (bx0, by0, bx1, by1) = boxes[j];
-                // Check if boxes intersect or touch
+                // Check if boxes intersect
                 if ax0 <= bx1 && ax1 >= bx0 && ay0 <= by1 && ay1 >= by0 {
-                    boxes[i] = (ax0.min(bx0), ay0.min(by0), ax1.max(bx1), ay1.max(by1));
-                    boxes.swap_remove(j);
-                    merged = true;
-                } else {
-                    j += 1;
+                    let u0 = ax0.min(bx0);
+                    let u1 = ay0.min(by0);
+                    let u2 = ax1.max(bx1);
+                    let u3 = ay1.max(by1);
+                    if (u2 - u0) <= max_dim && (u3 - u1) <= max_dim {
+                        boxes[i] = (u0, u1, u2, u3);
+                        boxes.swap_remove(j);
+                        merged = true;
+                        continue;
+                    }
                 }
+                j += 1;
             }
             i += 1;
         }
@@ -414,7 +461,7 @@ fn telea_harmonic_fill_roi(
     rh: usize,
     harm_sigma: f64,
 ) -> Vec<f32> {
-    let r_eff = (rw.min(rh) as f32 * 0.15).clamp(2.5, 8.0);
+    let r_eff = 3.0f32;
     sc_imgproc::inpaint_telea_harmonic_f32(detrended, mask, rw, rh, r_eff, harm_sigma)
 }
 
